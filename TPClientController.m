@@ -462,6 +462,33 @@ static TPClientController * _defaultClientController = nil;
 #pragma mark -
 #pragma mark Stop control
 
+- (void)_nudgePositionInward:(NSPoint*)position forHotBorder:(TPHotBorder*)hotBorder
+{
+	if(position == NULL || hotBorder == nil)
+		return;
+	
+	NSScreen * screen = [hotBorder screen];
+	if(screen == nil)
+		return;
+	
+	NSArray * screens = [NSScreen screens];
+	if([screens count] == 0)
+		return;
+	
+	CGFloat mainHeight = NSHeight([[screens objectAtIndex:0] frame]);
+	NSRect screenFrame = [screen frame];
+	
+	/* Position is expressed with a top-left origin (see _currentMouseLocation). */
+	NSRect flippedScreenFrame = NSMakeRect(NSMinX(screenFrame),
+										   mainHeight - NSMaxY(screenFrame),
+										   NSWidth(screenFrame),
+										   NSHeight(screenFrame));
+	
+	CGFloat inset = BORDER_SIZE + 2.0;
+	position->x = MIN(MAX(position->x, NSMinX(flippedScreenFrame) + inset), NSMaxX(flippedScreenFrame) - inset);
+	position->y = MIN(MAX(position->y, NSMinY(flippedScreenFrame) + inset), NSMaxY(flippedScreenFrame) - inset);
+}
+
 - (void)requestedStopControlWithInfoDict:(NSDictionary*)infoDict
 {
 	TPRemoteHost * controlledHost = [[self currentConnection] connectedHost];
@@ -476,6 +503,11 @@ static TPClientController * _defaultClientController = nil;
 	NSPoint mousePosition = [infoDict[TPMousePositionKey] pointValue];
 	TPHotBorder * hotBorder = _hotBorders[[controlledHost identifier]];
 	mousePosition = [hotBorder screenPointFromLocalPoint:mousePosition flipped:YES];
+	
+	/* Land a few points inside the screen instead of exactly on the edge:
+	   sitting inside the trigger strip prevents the border from arming and
+	   makes the next switch attempt fail until the cursor leaves the strip. */
+	[self _nudgePositionInward:&mousePosition forHotBorder:hotBorder];
 	
 	if([hotBorder state] != TPHotBorderInactiveState) {
 		[hotBorder deactivate];

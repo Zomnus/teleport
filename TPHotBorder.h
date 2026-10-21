@@ -14,7 +14,7 @@
 #if DEBUG_HOTBORDER
 #define BORDER_SIZE 4.0
 #else
-#define BORDER_SIZE 1.0
+#define BORDER_SIZE 3.0
 #endif
 
 @class TPHotBorderView;
@@ -36,6 +36,9 @@ typedef NS_ENUM(NSInteger, TPHotBorderState) {
 	NSTimer * _fireTimer;
 	NSTimer * _tapTimer;
 	NSTimer * _activateTimer;
+	BOOL _hasPendingFire;
+	NSEvent * _pendingFireEvent;
+	NSPoint _pendingFireLocation;
 	TPSide _side;
 }
 
@@ -60,6 +63,11 @@ typedef NS_ENUM(NSInteger, TPHotBorderState) {
 @property (nonatomic, readonly) TPHotBorderState state;
 
 - (void)fireAtLocation:(NSPoint)location withDraggingInfo:(id <NSDraggingInfo>)draggingInfo;
+
+/* Used when the cursor is clamped at the screen edge while the raw delta
+   keeps pushing outward: the user clearly intends to cross even if the
+   window server never delivered a mouseEntered event. */
+- (void)fireFromOutwardPushAtScreenPoint:(NSPoint)screenPoint;
 
 - (NSPoint)screenPointFromLocalPoint:(NSPoint)localPoint flipped:(BOOL)flipped;
 

@@ -119,6 +119,29 @@ static NSString * TPHotBorderDraggingInfoKey = @"TPHotBorderDraggingInfo";
 	_trackingRectTag = [hotView addTrackingRect:[hotView bounds] owner:self userData:NULL assumeInside:NO];
 }
 
+- (void)_firePendingAttemptIfAppropriate
+{
+	if(!_hasPendingFire)
+		return;
+	
+	NSEvent * event = _pendingFireEvent;
+	NSPoint location = _pendingFireLocation;
+	
+	_hasPendingFire = NO;
+	_pendingFireEvent = nil;
+	
+	BOOL insideBorder = NSPointInRect([self mouseLocationOutsideOfEventStream], [[self contentView] bounds]);
+	BOOL offScreen = !NSPointInRect([NSEvent mouseLocation], [[self screen] frame]);
+	
+	/* Fire only if the cursor is still on the edge or has actually crossed to
+	   the other Mac. A cursor that retreated into this screen was just a
+	   brush and must not trigger a switch. */
+	if(insideBorder || offScreen)
+		[self _fireAttemptWithEvent:event atLocation:location withDraggingInfo:nil];
+	else
+		DebugLog(@"discarding pending fire: cursor retreated");
+}
+
 - (void)activate
 {
 	_activateTimer = nil;
@@ -136,11 +159,16 @@ static NSString * TPHotBorderDraggingInfoKey = @"TPHotBorderDraggingInfo";
 	else {
 		_state = TPHotBorderActiveState;
 	}
+	
+	if(_state == TPHotBorderActiveState)
+		[self _firePendingAttemptIfAppropriate];
 }
 
 - (void)deactivate
 {
 	[self cancelDelayedActivate];
+	_hasPendingFire = NO;
+	_pendingFireEvent = nil;
 	_state = TPHotBorderInactiveState;
 }
 
@@ -275,6 +303,17 @@ static NSString * TPHotBorderDraggingInfoKey = @"TPHotBorderDraggingInfo";
 
 - (void)_fireAttemptWithEvent:(NSEvent*)event atLocation:(NSPoint)location withDraggingInfo:(id <NSDraggingInfo>)draggingInfo
 {
+	/* A fast pass can reach the border before the activation delay elapsed.
+	   Remember the attempt and replay it as soon as the border is armed,
+	   instead of silently dropping it (which forced users to try again). */
+	if(_state == TPHotBorderActivatingState) {
+		_hasPendingFire = YES;
+		_pendingFireEvent = event;
+		_pendingFireLocation = location;
+		DebugLog(@"pending fire while activating");
+		return;
+	}
+	
 	if(_state != TPHotBorderActiveState) {
 		DebugLog(@"not active");
 		return;
@@ -353,8 +392,10 @@ static NSString * TPHotBorderDraggingInfoKey = @"TPHotBorderDraggingInfo";
 	
 	/* Armed as soon as the cursor leaves the edge strip, regardless of how
 	   quickly it passed through. */
-	if(_state == TPHotBorderActivatingState)
+	if(_state == TPHotBorderActivatingState) {
 		_state = TPHotBorderActiveState;
+		[self _firePendingAttemptIfAppropriate];
+	}
 	
 	[self _discardFireAttempt];
 }
@@ -403,6 +444,21 @@ static NSString * TPHotBorderDraggingInfoKey = @"TPHotBorderDraggingInfo";
 	[self fireAtLocation:location withDraggingInfo:fireDict[TPHotBorderDraggingInfoKey]];
 }
 	
+- (void)fireFromOutwardPushAtScreenPoint:(NSPoint)screenPoint
+{
+	if(_state == TPHotBorderInactiveState || _hotDelegate == nil)
+		return;
+	
+	if([_hotDelegate respondsToSelector:@selector(hotBorder:canFireWithEvent:)]) {
+		NSEvent * event = [NSApp currentEvent];
+		if(event != nil && ![_hotDelegate hotBorder:self canFireWithEvent:event])
+			return;
+	}
+	
+	NSPoint windowPoint = [self convertScreenToBase:screenPoint];
+	[self fireAtLocation:windowPoint withDraggingInfo:nil];
+}
+
 - (void)fireAtLocation:(NSPoint)location withDraggingInfo:(id <NSDraggingInfo>)draggingInfo
 {
 	[self _discardFireAttempt];

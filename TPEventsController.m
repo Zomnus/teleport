@@ -381,17 +381,21 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 	_currentMouseLocation.x = MAX(NSMinX(screenFrame), MIN(_currentMouseLocation.x, NSMaxX(screenFrame) - 1.0));
 	_currentMouseLocation.y = MAX(NSMinY(screenFrame), MIN(_currentMouseLocation.y, NSMaxY(screenFrame) - 1.0));
 	
-	// When locked, HotBorder will never receiver mouseEnter events.
-	// Work around to make it possible to move back to the client.
-	if([TPScreenLockWatcher isLocked]) {
-		TPHotBorder *border = [[TPServerController defaultController] currentHotBorder];
+	// When the cursor is clamped at the edge but the raw delta keeps pushing
+	// outward, treat it as a switch request even if no mouseEntered event was
+	// delivered (fast movement can jump over the 3pt strip). This also covers
+	// the locked-screen case below.
+	TPHotBorder *border = [[TPServerController defaultController] currentHotBorder];
+	if(border != nil) {
 		NSScreen * screen = (NSUInteger)_currentScreenIndex < [_cachedScreens count] ? [_cachedScreens objectAtIndex:_currentScreenIndex] : nil;
 		if (screen == [border screen]) {
 			// _currentMouseLocation is relative to the left-top corner of the main screen.
 			// while borderRect is relative to the left-bottom corner of the main screen.
 			CGPoint mouseLocationInvertY = CGPointMake(_currentMouseLocation.x, _cachedMainScreenHeight - _currentMouseLocation.y);
-			if (CGRectContainsPoint(border.frame, mouseLocationInvertY)) {
-				[[TPServerController defaultController] stopControl];
+			/* Inset by -1 so that clamping exactly onto a border edge
+			   (notably the top edge) still counts as inside. */
+			if (CGRectContainsPoint(CGRectInset(border.frame, -1.0, -1.0), mouseLocationInvertY)) {
+				[border fireFromOutwardPushAtScreenPoint:NSPointFromCGPoint(mouseLocationInvertY)];
 			}
 		}
 	}
