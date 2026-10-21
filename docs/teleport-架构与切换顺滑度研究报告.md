@@ -734,3 +734,23 @@ CFRunLoopAddSource(runLoop, eventSrc, kCFRunLoopCommonModes);
 - `PROTOCOL_VERSION` 已升至 **21**，两台 Mac 必须同时升级到 v1.4，否则会提示协议版本不匹配（这是预期行为，避免新旧混用时事件格式错乱）。
 - 首次运行仍需在"系统设置 → 隐私与安全性 → 辅助功能"授权。
 - 建议在两台真机上补测：1000Hz 鼠标 p99、Wi-Fi 丢包 1%–5%、菜单/窗口拖拽期间的控制连续性、混合 DPI 双屏边界切换。
+
+### D.5 v1.4.1 热修复：来回切换后失去控制
+
+**现象**：两台 Mac 之间反复切换数次后，鼠标无法再自由来回移动，需要重启应用。
+
+**根因（两层）**：
+
+1. 每次控制结束都调用 `CGEventTapEnable(false)`，系统会向回调投递 `kCGEventTapDisabledByUserInput`（`type = -1`）。原回调把 `type >= kCGEventTapDisabledByTimeout` 一律当作超时并立即重新启用，与系统状态反复对抗；数轮之后该进程的 event tap 被系统永久禁用，`CGEventTapIsEnabled` 仍可能返回 true，但不再有任何回调。同时每个会话都销毁并重建采集线程，存在 runloop/端口引用竞态。
+2. 热区激活逻辑在 `mouseExited` 时取消激活，且 `activate` 每 0.1s 轮询自身；快速穿过边缘时会停留在 `Activating` 状态，导致返回热区无法武装。
+
+**修复**：
+
+- event tap 改为**进程级常驻**：只创建一次，控制期间吞掉并转发事件；非控制期间回调**原样返回事件**（放行），不再反复 enable/disable。
+- 回调只对 `kCGEventTapDisabledByTimeout` 执行重新启用；`kCGEventTapDisabledByUserInput` 保持系统状态。下一次控制会话启动时会重新启用。
+- 增加 `_sessionGeneration`：过期的自动停止请求不得终止新会话。
+- 热区：`activate` 不再轮询；光标仍在边缘时保持 `Activating`，由 `mouseExited` 在离开边缘时立即武装；已 `Active` 的边界不会被后续定时器降级。
+
+**验证**：30 次快速「开始采集 → 合成事件 → 停止」循环，修复后 **0 失败**（每轮稳定捕获 3–6 个合并后事件）；修复前同一测试从第 3 轮起连续零采集。
+
+**产物**：`teleport-1.4.1-macos.zip`（`arm64 + x86_64`，ad-hoc 签名，协议 21）。

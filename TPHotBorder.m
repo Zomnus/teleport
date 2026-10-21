@@ -123,8 +123,15 @@ static NSString * TPHotBorderDraggingInfoKey = @"TPHotBorderDraggingInfo";
 {
 	_activateTimer = nil;
 	
+	/* Never downgrade an already armed border. */
+	if(_state == TPHotBorderActiveState)
+		return;
+	
 	if(NSPointInRect([self mouseLocationOutsideOfEventStream], [[self contentView] bounds])) {
-		[self performSelector:@selector(activate) withObject:nil afterDelay:0.1]; // post-pone activation until mouse is not already in the hot border
+		/* Cursor is still sitting on the edge (e.g. right after a switch).
+		   Stay in the activating state and arm on mouseExited instead of
+		   polling forever. */
+		_state = TPHotBorderActivatingState;
 	}
 	else {
 		_state = TPHotBorderActiveState;
@@ -344,9 +351,11 @@ static NSString * TPHotBorderDraggingInfoKey = @"TPHotBorderDraggingInfo";
 {
 	DebugLog(@"mouseExited");
 	
-	/* A cursor that just brushes past the edge should not arm the border for
-	   a later accidental trigger. */
-	[self cancelDelayedActivate];
+	/* Armed as soon as the cursor leaves the edge strip, regardless of how
+	   quickly it passed through. */
+	if(_state == TPHotBorderActivatingState)
+		_state = TPHotBorderActiveState;
+	
 	[self _discardFireAttempt];
 }
 

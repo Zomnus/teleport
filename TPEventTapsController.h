@@ -22,6 +22,8 @@
 	BOOL _tapInstalled;
 	BOOL _tapInstallSucceeded;
 	BOOL _stopRequestedFromCallback;
+	BOOL _tapOnMainRunLoop;
+	NSInteger _sessionGeneration;
 }
 
 @end

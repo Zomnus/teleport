@@ -77,20 +77,25 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 {
 	TPEventTapsController * self = (__bridge TPEventTapsController*)refcon;
 	
-#if DEBUG_EVENTTAP
-	NSLog(@"Callback: %@", [TPEventTapsController _eventNameFromType:type]);
-#endif
-
 	if(type >= kCGEventTapDisabledByTimeout) {
-		[self _startGettingsEvents];
+		/* Only a real timeout is recoverable. kCGEventTapDisabledByUserInput
+		   is set by the system and must be respected; trying to re-enable
+		   after it leaves the tap permanently dead after a few cycles. */
+		if(type == kCGEventTapDisabledByTimeout)
+			[self _startGettingsEvents];
 		return NULL;
 	}
 	
-	if(![[TPClientController defaultController] isControlling]) {
-		/* Never touch AppKit or the run loop from inside the tap callback:
-		   hand control back to the main thread. */
-		[self _requestStopFromCallback];
-		return NULL;
+	BOOL controlling = [[TPClientController defaultController] isControlling];
+	BOOL capturing = ([self eventsListener] != nil) && controlling;
+	
+	if(!capturing) {
+		/* Not capturing: let the event flow through untouched. The tap stays
+		   installed for the lifetime of the process instead of being
+		   disabled/re-enabled on every switch. */
+		if([self eventsListener] != nil)
+			[self _requestStopFromCallback];
+		return event;
 	}
 	
 	@autoreleasepool {
@@ -132,9 +137,21 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 	setCursorVisibility(NO);
 	[self invalidateScreenCache];
 	
+	/* A new capture session starts here. Stale stop requests from a previous
+	   session compare against this counter and are ignored. */
+	@synchronized(self) {
+		_sessionGeneration++;
+	}
+	
 	if(_eventPort != NULL) {
-		[self _startGettingsEvents];
-		return;
+		if(_eventThread == nil && !_tapOnMainRunLoop) {
+			/* The capturing thread died unexpectedly: rebuild from scratch. */
+			[self _teardownEventTap];
+		}
+		else {
+			[self _startGettingsEvents];
+			return;
+		}
 	}
 	
 	if(_threadCondition == nil)
@@ -160,7 +177,7 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 		[_threadCondition lock];
 		_eventThread = nil;
 		[_threadCondition unlock];
-		[self _installEventTapOnRunLoop:CFRunLoopGetCurrent() mode:kCFRunLoopCommonModes];
+		_tapOnMainRunLoop = [self _installEventTapOnRunLoop:CFRunLoopGetCurrent() mode:kCFRunLoopCommonModes];
 	}
 }
 
@@ -178,6 +195,9 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 		[_threadCondition unlock];
 		
 		if(installed) {
+			/* The tap lives for the lifetime of the process and is only
+			   enabled/disabled between sessions. Tearing the thread down on
+			   every switch caused races with rapid back-and-forth switching. */
 			CFRunLoopRun();
 			[self _teardownEventTap];
 		}
@@ -242,16 +262,27 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 
 - (void)_requestStopFromCallback
 {
+	NSInteger generation;
+	
 	@synchronized(self) {
 		if(_stopRequestedFromCallback)
 			return;
 		_stopRequestedFromCallback = YES;
+		generation = _sessionGeneration;
 	}
 	
 	dispatch_async(dispatch_get_main_queue(), ^{
 		@synchronized(self) {
 			_stopRequestedFromCallback = NO;
 		}
+		
+		/* A new control session may have started in the meantime. Never let
+		   a stale stop request kill it. */
+		if(generation != _sessionGeneration)
+			return;
+		if([[TPClientController defaultController] isControlling])
+			return;
+		
 		[self stopGettingEvents];
 	});
 }
@@ -272,37 +303,10 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 
 - (void)_stopGettingEvents
 {
-	if([NSThread currentThread] == _eventThread) {
-		dispatch_async(dispatch_get_main_queue(), ^{
-			[self _stopGettingEvents];
-		});
-		return;
-	}
-	
-	if(_eventPort != NULL && CGEventTapIsEnabled(_eventPort)) {
-		CGEventTapEnable(_eventPort, false);
-	}
-	
-	BOOL mainThreadFallback = (_eventThread == nil && _eventPort != NULL);
-	
-	if(_eventThread != nil && _eventRunLoop != NULL) {
-		CFRunLoopStop(_eventRunLoop);
-		CFRunLoopWakeUp(_eventRunLoop);
-		
-		[_threadCondition lock];
-		NSDate * deadline = [NSDate dateWithTimeIntervalSinceNow:0.5];
-		while(_eventThread != nil && [deadline timeIntervalSinceNow] > 0)
-			[_threadCondition waitUntilDate:deadline];
-		BOOL stillRunning = (_eventThread != nil);
-		[_threadCondition unlock];
-		
-		if(stillRunning)
-			NSLog(@"teleport: event tap thread did not stop in time");
-	}
-	else if(mainThreadFallback) {
-		[self _teardownEventTap];
-	}
-	
+	/* The tap is left installed and enabled, but from now on the callback
+	   passes every event through untouched (eventsListener is cleared by the
+	   caller right after this method). This avoids the system's
+	   "disabled by user input" state that permanently kills a re-enabled tap. */
 	TPMainController * mainController = (TPMainController*)[NSApp delegate];
 	if([NSThread isMainThread])
 		[mainController leaveFrontmost];
@@ -318,7 +322,6 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 		
 	setCursorVisibility(YES);
 }
-
 
 #pragma mark -
 #pragma mark Posting events
