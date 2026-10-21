@@ -35,6 +35,7 @@ typedef NS_ENUM(NSInteger, TPHotBorderState) {
 	NSTrackingRectTag _trackingRectTag;
 	NSTimer * _fireTimer;
 	NSTimer * _tapTimer;
+	NSTimer * _activateTimer;
 	TPSide _side;
 }
 

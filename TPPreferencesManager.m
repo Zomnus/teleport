@@ -138,7 +138,7 @@ static TPPreferencesManager * _sharedPreferencesManager = nil;
 												   /* Secret stuff */
 												   HIDE_CONTROL_BEZEL: @NO,
 												   @"visibleBorders": @NO,
-												   INHIBITION_PERIOD: @0.2f,
+												   INHIBITION_PERIOD: @0.1f,
 												   SYNC_FIND_PASTEBOARD: @NO,
 												   WARNED_ABOUT_ACCESSIBILITY: @NO,
 #if DEBUG_BUILD || PRERELEASE_BUILD

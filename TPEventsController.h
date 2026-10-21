@@ -43,6 +43,15 @@
 	CGFloat _cachedMainScreenHeight;
 	BOOL _screenCacheValid;
 	
+	/* Mouse move coalescing (sender side only). */
+	CFTypeRef _pendingMouseEvent;
+	CGEventType _pendingMouseType;
+	int64_t _pendingMouseButton;
+	int64_t _pendingDeltaX;
+	int64_t _pendingDeltaY;
+	NSTimeInterval _lastMouseBatchStart;
+	NSTimer * _mouseFlushTimer;
+	
 	NSTimeInterval _lastPostedEventDate;
 }
 
@@ -87,5 +96,9 @@
 - (void)_rebuildScreenCacheIfNeeded;
 - (uint64_t)_eventAgeForEvent:(id)event;
 - (CGEventTimestamp)_timestampForEventAge:(uint64_t)age;
+- (BOOL)_isCoalescableMouseEvent:(CGEventRef)event;
+- (BOOL)_coalesceMouseEvent:(CGEventRef)event;
+- (void)_flushPendingMouseEvent;
+- (void)_deliverEventToListener:(id)event;
 
 @end

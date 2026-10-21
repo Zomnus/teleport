@@ -283,7 +283,7 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 	/* Feed synthetic events so the capture -> encode -> listener path is
 	   exercised even when nobody touches the mouse. */
 	for(int i = 0; i < 5; i++) {
-		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((0.4 + 0.2 * i) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((0.3 + 0.2 * i) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
 			CGEventRef synthetic = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, CGPointMake(300 + 20 * i, 300), 0);
 			if(synthetic != NULL) {
 				CGEventPost(kCGHIDEventTap, synthetic);
@@ -291,6 +291,26 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 			}
 		});
 	}
+	
+	/* Rapid burst: verifies mouse coalescing reduces the number of messages. */
+	__block NSInteger burstBaseline = 0;
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+		burstBaseline = self.selfTestEventCount;
+		for(int i = 0; i < 200; i++) {
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((i * 0.001) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+				CGEventRef synthetic = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, CGPointMake(500 + (i % 40), 500), 0);
+				if(synthetic != NULL) {
+					CGEventPost(kCGHIDEventTap, synthetic);
+					CFRelease(synthetic);
+				}
+			});
+		}
+	});
+	
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+		NSLog(@"TAP SELFTEST BURST: posted=200 delivered=%ld total=%ld",
+			  (long)(self.selfTestEventCount - burstBaseline), (long)self.selfTestEventCount);
+	});
 	
 	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
 		[self stopGettingEvents];

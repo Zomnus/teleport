@@ -62,7 +62,119 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 	[self _startGettingEventsOnScreen:screen];
 }
 
+- (BOOL)_isCoalescableMouseEvent:(CGEventRef)event
+{
+	switch(CGEventGetType(event)) {
+		case kCGEventMouseMoved:
+		case kCGEventLeftMouseDragged:
+		case kCGEventRightMouseDragged:
+		case kCGEventOtherMouseDragged:
+			return YES;
+		default:
+			return NO;
+	}
+}
+
+- (BOOL)_coalesceMouseEvent:(CGEventRef)event
+{
+	BOOL consumed = NO;
+	
+	@synchronized(self) {
+		NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+		CGEventType type = CGEventGetType(event);
+		int64_t button = CGEventGetIntegerValueField(event, kCGMouseEventButtonNumber);
+		int64_t deltaX = CGEventGetIntegerValueField(event, kCGMouseEventDeltaX);
+		int64_t deltaY = CGEventGetIntegerValueField(event, kCGMouseEventDeltaY);
+		
+		if(_pendingMouseEvent == NULL) {
+			_pendingMouseEvent = CFRetain(event);
+			_pendingMouseType = type;
+			_pendingMouseButton = button;
+			_pendingDeltaX = deltaX;
+			_pendingDeltaY = deltaY;
+			_lastMouseBatchStart = now;
+			
+			[_mouseFlushTimer invalidate];
+			_mouseFlushTimer = [NSTimer scheduledTimerWithTimeInterval:0.004
+															   target:self
+															 selector:@selector(_mouseFlushTimerFired:)
+															 userInfo:nil
+															  repeats:NO];
+			consumed = YES;
+		}
+		else if(type == _pendingMouseType && button == _pendingMouseButton) {
+			_pendingDeltaX += deltaX;
+			_pendingDeltaY += deltaY;
+			
+			/* Keep the newest event for flags and timestamp; the accumulated
+			   delta is written back when the batch is flushed. */
+			CFRelease(_pendingMouseEvent);
+			_pendingMouseEvent = CFRetain(event);
+			consumed = YES;
+		}
+	}
+	
+	if(!consumed) {
+		/* Type/button changed: flush the previous batch and deliver this one
+		   immediately so that ordering and latency are preserved. */
+		[self _flushPendingMouseEvent];
+	}
+	
+	return consumed;
+}
+
+- (void)_mouseFlushTimerFired:(NSTimer*)timer
+{
+	@synchronized(self) {
+		_mouseFlushTimer = nil;
+	}
+	[self _flushPendingMouseEvent];
+}
+
+- (void)_flushPendingMouseEvent
+{
+	CGEventRef event = NULL;
+	int64_t deltaX = 0;
+	int64_t deltaY = 0;
+	
+	@synchronized(self) {
+		if(_pendingMouseEvent == NULL)
+			return;
+		
+		event = (CGEventRef)_pendingMouseEvent;
+		_pendingMouseEvent = NULL;
+		deltaX = _pendingDeltaX;
+		deltaY = _pendingDeltaY;
+		
+		[_mouseFlushTimer invalidate];
+		_mouseFlushTimer = nil;
+	}
+	
+	CGEventSetIntegerValueField(event, kCGMouseEventDeltaX, deltaX);
+	CGEventSetIntegerValueField(event, kCGMouseEventDeltaY, deltaY);
+	
+	[self _deliverEventToListener:(__bridge id)event];
+	CFRelease(event);
+}
+
 - (void)_sendEventToListener:(id)event
+{
+	CGEventRef cgEvent = (__bridge CGEventRef)event;
+	
+	if([self _isCoalescableMouseEvent:cgEvent]) {
+		/* Let the very first event through untouched (it is either discarded
+		   as the initial jump or delivered immediately). */
+		if(_lastPostedEventDate != 0.0 && [self _coalesceMouseEvent:cgEvent])
+			return;
+	}
+	else {
+		[self _flushPendingMouseEvent];
+	}
+	
+	[self _deliverEventToListener:event];
+}
+
+- (void)_deliverEventToListener:(id)event
 {
 	id<TPEventsListener> eventsListener = [self eventsListener];
 	
@@ -105,8 +217,18 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 
 - (void)stopGettingEvents
 {
+	[self _flushPendingMouseEvent];
 	[self _stopGettingEvents];
 	_eventsListener = nil;
+}
+
+- (void)dealloc
+{
+	if(_pendingMouseEvent != NULL) {
+		CFRelease(_pendingMouseEvent);
+		_pendingMouseEvent = NULL;
+	}
+	[_mouseFlushTimer invalidate];
 }
 
 - (void)cleanupGettingEvents

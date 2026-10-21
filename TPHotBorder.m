@@ -121,6 +121,8 @@ static NSString * TPHotBorderDraggingInfoKey = @"TPHotBorderDraggingInfo";
 
 - (void)activate
 {
+	_activateTimer = nil;
+	
 	if(NSPointInRect([self mouseLocationOutsideOfEventStream], [[self contentView] bounds])) {
 		[self performSelector:@selector(activate) withObject:nil afterDelay:0.1]; // post-pone activation until mouse is not already in the hot border
 	}
@@ -131,6 +133,7 @@ static NSString * TPHotBorderDraggingInfoKey = @"TPHotBorderDraggingInfo";
 
 - (void)deactivate
 {
+	[self cancelDelayedActivate];
 	_state = TPHotBorderInactiveState;
 }
 
@@ -219,11 +222,23 @@ static NSString * TPHotBorderDraggingInfoKey = @"TPHotBorderDraggingInfo";
 	float inhibitionPeriod = [[TPPreferencesManager sharedPreferencesManager] floatForPref:INHIBITION_PERIOD];
 	if(inhibitionPeriod > 0.0) {
 		_state = TPHotBorderActivatingState;
-		[NSTimer scheduledTimerWithTimeInterval:inhibitionPeriod target:self selector:@selector(activate) userInfo:nil repeats:NO];
+		[_activateTimer invalidate];
+		_activateTimer = [NSTimer scheduledTimerWithTimeInterval:inhibitionPeriod target:self selector:@selector(activate) userInfo:nil repeats:NO];
 	}
 	else {
 		[self activate];
 	}
+}
+
+- (void)cancelDelayedActivate
+{
+	if(_activateTimer != nil) {
+		[_activateTimer invalidate];
+		_activateTimer = nil;
+	}
+	
+	if(_state == TPHotBorderActivatingState)
+		_state = TPHotBorderInactiveState;
 }
 
 - (NSPoint)screenPointFromLocalPoint:(NSPoint)localPoint flipped:(BOOL)flipped
@@ -329,6 +344,9 @@ static NSString * TPHotBorderDraggingInfoKey = @"TPHotBorderDraggingInfo";
 {
 	DebugLog(@"mouseExited");
 	
+	/* A cursor that just brushes past the edge should not arm the border for
+	   a later accidental trigger. */
+	[self cancelDelayedActivate];
 	[self _discardFireAttempt];
 }
 

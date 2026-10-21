@@ -200,6 +200,9 @@ static void _cfsocketCallback(CFSocketRef inCFSocketRef, CFSocketCallBackType in
 	sendTimeout.tv_usec = 0;
 	setsockopt(CFSocketGetNative(_cfSocket), SOL_SOCKET, SO_SNDTIMEO, &sendTimeout, sizeof(sendTimeout));
 	
+	int keepAlive = 1;
+	setsockopt(CFSocketGetNative(_cfSocket), SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(keepAlive));
+	
 	[_sendCondition lock];
 	_sendFailed = NO;
 	_stopSendThread = NO;

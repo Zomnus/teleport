@@ -155,7 +155,7 @@ static TPMainController * _mainController = nil;
 	
 	if(getenv("TELEPORT_TAP_SELFTEST") != NULL) {
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-			[[TPEventsController defaultController] runSelfTestForSeconds:2.0];
+			[[TPEventsController defaultController] runSelfTestForSeconds:3.2];
 		});
 	}
 #endif
