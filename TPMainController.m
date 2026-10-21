@@ -34,6 +34,12 @@
 
 #import "TPNetworkConnection.h"
 #import "TPTestsController.h"
+#import "TPEventsController.h"
+
+/* Temporary self-test hook (removed after validation). */
+@interface TPEventsController (TapSelfTest)
+- (void)runSelfTestForSeconds:(double)seconds;
+@end
 
 typedef CGError CGSError;
 
@@ -146,6 +152,12 @@ static TPMainController * _mainController = nil;
 #if 0
 	[TPTestsController runFakeHostsTest];
 #endif
+	
+	if(getenv("TELEPORT_TAP_SELFTEST") != NULL) {
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+			[[TPEventsController defaultController] runSelfTestForSeconds:2.0];
+		});
+	}
 #endif
 }
 
@@ -190,6 +202,7 @@ static TPMainController * _mainController = nil;
 
 - (void)applicationDidChangeScreenParameters:(NSNotification *)aNotification
 {
+	[[TPEventsController defaultController] invalidateScreenCache];
 	[[TPHostsManager defaultManager] notifyChanges];
 	
 	if([[TPServerController defaultController] allowControl]) {

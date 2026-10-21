@@ -11,6 +11,11 @@
 #define ESC_KEYCODE 53
 #define DISABLE_CONTROL 0
 
+/* Number of bytes prepended to every serialized event: the event's age in
+   nanoseconds at capture time. Both peers are required to understand it
+   (protocol version 20+). */
+#define TP_EVENT_AGE_LENGTH 8
+
 @class TPRemoteHost;
 
 @protocol TPEventsListener <NSObject>
@@ -18,6 +23,10 @@
 - (void)gotEventWithEventData:(NSData*)eventData;
 - (void)gotEmergencyStopEvent;
 - (BOOL)shouldStopWithEvent:(NSEvent*)event;
+
+@optional
+/* Side-effect free variant, safe to call from the event tap thread. */
+- (BOOL)isStopControlEvent:(NSEvent*)event;
 
 @end
 
@@ -27,6 +36,12 @@
 	
 	int _currentScreenIndex;
 	CGPoint _currentMouseLocation;
+	BOOL _mouseLocationValid;
+	
+	NSArray * _cachedScreens;
+	NSArray * _cachedScreenFrames;
+	CGFloat _cachedMainScreenHeight;
+	BOOL _screenCacheValid;
 	
 	NSTimeInterval _lastPostedEventDate;
 }
@@ -50,6 +65,10 @@
 
 - (BOOL)event:(NSEvent*)event hasRequiredKeyIfNeeded:(BOOL)needed withTag:(NSEventType)tag;
 
+/* Screen geometry is cached and only rebuilt when the display configuration
+   changes (see TPMainController's applicationDidChangeScreenParameters). */
+- (void)invalidateScreenCache;
+
 @end
 
 @interface TPEventsController (Internal)
@@ -65,5 +84,8 @@
 - (void)_postEventWithEventData:(NSData*)eventData;
 
 - (void)_updateMouseLocationWithMouseDelta:(TPMouseDelta)mouseDelta;
+- (void)_rebuildScreenCacheIfNeeded;
+- (uint64_t)_eventAgeForEvent:(id)event;
+- (CGEventTimestamp)_timestampForEventAge:(uint64_t)age;
 
 @end

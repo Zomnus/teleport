@@ -299,31 +299,37 @@ OSStatus _TPTCPSecureSocketWrite(SSLConnectionRef connection, const void *data, 
 	}
 }
 
-- (BOOL)sendData:(NSData*)data
+- (BOOL)_writeData:(NSData*)data
 {
 	PRINT_ME_IF(DEBUG_SOCKET);
 	
 	if(_enableEncryption) {
 		size_t dataLength = [data length];
 		size_t dataProcessed = 0;
+		int stalledAttempts = 500; // up to ~500ms of back-pressure
 		
 		while(dataProcessed < dataLength) {
 			size_t processed = 0;
 			OSStatus err;
 			[_sslLock lock];
-			if((err = SSLWrite(_contextRef, ([data bytes] + dataProcessed), (dataLength - dataProcessed), &processed)) != noErr) {
+			err = SSLWrite(_contextRef, ([data bytes] + dataProcessed), (dataLength - dataProcessed), &processed);
+			[_sslLock unlock];
+			
+			if(err != noErr) {
+				if(err == errSSLWouldBlock && stalledAttempts-- > 0) {
+					usleep(1000);
+					continue;
+				}
 				NSLog(@"SSL unable to write data: %d", err);
-				[_sslLock unlock];
 				return NO;
 			}
-			[_sslLock unlock];
 			dataProcessed += processed;
 		}
 		
 		return YES;		
 	}
 	else {
-		return [super sendData:data];
+		return [super _writeData:data];
 	}
 }
 

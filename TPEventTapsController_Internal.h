@@ -15,5 +15,6 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 
 + (NSString*)_eventNameFromType:(CGEventType)type;
 - (void)_postEvent:(CGEventRef)event;
+- (void)_postEvent:(CGEventRef)event withTimestamp:(CGEventTimestamp)timestamp;
 
 @end

@@ -13,7 +13,19 @@
 @interface TPEventTapsController : TPEventsController
 {
 	CFMachPortRef _eventPort;
+	CFRunLoopSourceRef _eventSourceRef;
 	CGEventSourceRef _eventSource;
+	
+	NSThread * _eventThread;
+	CFRunLoopRef _eventRunLoop;
+	NSCondition * _threadCondition;
+	BOOL _tapInstalled;
+	BOOL _tapInstallSucceeded;
+	BOOL _stopRequestedFromCallback;
+	BOOL _selfTestActive;
 }
+
+@property (atomic) NSInteger selfTestEventCount;
+- (void)runSelfTestForSeconds:(double)seconds;
 
 @end

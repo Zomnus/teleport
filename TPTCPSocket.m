@@ -19,6 +19,12 @@
 #define CONNECTION_TIMEOUT 5.0
 #define SEND_TIMEOUT 2.0
 
+/* Bounded write queue: keeps the event tap / main thread from ever blocking on
+   the network. Values are deliberately generous so that control messages are
+   never dropped in normal operation; the queue only trims under a long stall. */
+#define SEND_QUEUE_MAX_MESSAGES 65536
+#define SEND_QUEUE_MAX_BYTES (16 * 1024 * 1024)
+
 static void _cfsocketCallback(CFSocketRef inCFSocketRef, CFSocketCallBackType inType, CFDataRef inAddress, const void* inData, void* inContext);
 
 @interface TPTCPSocket (Private)
@@ -96,6 +102,13 @@ static void _cfsocketCallback(CFSocketRef inCFSocketRef, CFSocketCallBackType in
 	_socketState = TPSocketDisconnectedState;
 	_noDelay = NO;
 	_lock = [[NSLock alloc] init];
+	_sendQueue = [[NSMutableArray alloc] init];
+	_sendQueueBytes = 0;
+	_sendCondition = [[NSCondition alloc] init];
+	_sendThreadRunning = NO;
+	_stopSendThread = NO;
+	_sendFailed = NO;
+	_pendingReceivedData = [[NSMutableData alloc] init];
 	
 	return self;
 }
@@ -103,6 +116,14 @@ static void _cfsocketCallback(CFSocketRef inCFSocketRef, CFSocketCallBackType in
 - (void)setDelegate:(id)delegate
 {
 	_delegate = delegate;
+	
+	/* Flush anything that arrived before the delegate was attached. */
+	if(delegate != nil && [_pendingReceivedData length] > 0) {
+		NSData * pending = [_pendingReceivedData copy];
+		[_pendingReceivedData setLength:0];
+		if([delegate respondsToSelector:@selector(tcpSocket:gotData:)])
+			[delegate tcpSocket:self gotData:pending];
+	}
 }
 
 - (id)delegate
@@ -166,11 +187,23 @@ static void _cfsocketCallback(CFSocketRef inCFSocketRef, CFSocketCallBackType in
 	
 	/* Setup socket flags */
 	int socketOptionFlag = 1;
-	int result = setsockopt(CFSocketGetNative(_cfSocket), SOL_SOCKET, SO_REUSEADDR, &socketOptionFlag, sizeof(int));
+	int result = setsockopt(CFSocketGetNative(_cfSocket), SOL_SOCKET, SO_REUSEADDR, &socketOptionFlag, sizeof(socketOptionFlag));
 	if(result < 0) {
 		DebugLog(@"error setting reusability of address");
 		return NO;
 	}
+	
+	/* Bound blocking writes so that closing the socket cannot hang the writer
+	   thread forever if the peer stops reading. */
+	struct timeval sendTimeout;
+	sendTimeout.tv_sec = (int)SEND_TIMEOUT;
+	sendTimeout.tv_usec = 0;
+	setsockopt(CFSocketGetNative(_cfSocket), SOL_SOCKET, SO_SNDTIMEO, &sendTimeout, sizeof(sendTimeout));
+	
+	[_sendCondition lock];
+	_sendFailed = NO;
+	_stopSendThread = NO;
+	[_sendCondition unlock];
 	
 	[self _setRunLoop:CFRunLoopGetCurrent()];
 	
@@ -441,55 +474,134 @@ static void _cfsocketCallback(CFSocketRef inCFSocketRef, CFSocketCallBackType in
 
 - (BOOL)sendData:(NSData*)data
 {
-#if DEBUG_SOCKET
-	DebugLog(@"%@ sending data (%d)", self, [data length]);
-#endif
+	if(data == nil || [data length] == 0)
+		return YES;
 	
-	BOOL result = ([self _sendData:(CFDataRef)data] == noErr);
+	[_sendCondition lock];
 	
-#if DEBUG_SOCKET
-	DebugLog(@"%@ end sending data (%d): %d", self, [data length], result);
-#endif
+	if(_socketState != TPSocketConnectedState || _sendFailed) {
+		[_sendCondition unlock];
+		return NO;
+	}
 	
-	return result;
+	if([_sendQueue count] >= SEND_QUEUE_MAX_MESSAGES || _sendQueueBytes + [data length] > SEND_QUEUE_MAX_BYTES) {
+		/* Network is stalled: keep memory bounded by dropping the oldest entry.
+		   This should only happen after several seconds of no progress. */
+		NSData * droppedData = [_sendQueue firstObject];
+		if(droppedData != nil) {
+			_sendQueueBytes -= [droppedData length];
+			[_sendQueue removeObjectAtIndex:0];
+		}
+		DebugLog(@"send queue overflow, dropped %d bytes", (int)[droppedData length]);
+	}
+	
+	[_sendQueue addObject:data];
+	_sendQueueBytes += [data length];
+	
+	if(!_sendThreadRunning) {
+		_sendThreadRunning = YES;
+		_stopSendThread = NO;
+		[NSThread detachNewThreadSelector:@selector(_sendThreadMain) toTarget:self withObject:nil];
+	}
+	
+	[_sendCondition signal];
+	[_sendCondition unlock];
+	
+	return YES;
+}
+
+- (void)_sendThreadMain
+{
+	@autoreleasepool {
+		for(;;) {
+			NSData * data = nil;
+			
+			[_sendCondition lock];
+			while([_sendQueue count] == 0 && !_stopSendThread)
+				[_sendCondition wait];
+			
+			if(_stopSendThread && [_sendQueue count] == 0) {
+				_sendThreadRunning = NO;
+				[_sendCondition broadcast];
+				[_sendCondition unlock];
+				break;
+			}
+			
+			data = [_sendQueue objectAtIndex:0];
+			[_sendQueue removeObjectAtIndex:0];
+			_sendQueueBytes -= [data length];
+			[_sendCondition unlock];
+			
+			if(![self _writeData:data]) {
+				[_sendCondition lock];
+				_sendFailed = YES;
+				_sendThreadRunning = NO;
+				[_sendQueue removeAllObjects];
+				_sendQueueBytes = 0;
+				[_sendCondition broadcast];
+				[_sendCondition unlock];
+				
+				/* Delegate callbacks must run on the main thread. */
+				dispatch_async(dispatch_get_main_queue(), ^{
+					[self _connectionClosed];
+				});
+				break;
+			}
+		}
+	}
 }
 
 - (OSStatus)_sendData:(CFDataRef)data
+{
+	return [self _writeData:(__bridge NSData*)data] ? noErr : kCFSocketError;
+}
+
+- (BOOL)_writeData:(NSData*)data
 {
 	[_lock lock];
 	
 	if(_cfSocket == NULL || !CFSocketIsValid(_cfSocket)) {
 		[_lock unlock];
-		return kCFSocketError;
+		return NO;
 	}
 	
-	CFSocketEnableCallBacks(_cfSocket, kCFSocketWriteCallBack);
+	CFSocketNativeHandle sock = CFSocketGetNative(_cfSocket);
+	const uint8_t * dataptr = [data bytes];
+	SInt32 datalen = (SInt32)[data length];
+	int stalledAttempts = 3;
+	BOOL success = YES;
 	
-	int retries = 10;
-    SInt32 size = 0;
-    CFSocketNativeHandle sock = CFSocketGetNative(_cfSocket);
-    const uint8_t * dataptr = CFDataGetBytePtr(data);
-    SInt32 datalen = CFDataGetLength(data);
-	
-	size = send(sock, dataptr, datalen, 0);
-	while(size < datalen && retries--) {
-		DebugLog(@"retrying send, sent size: %d", size);
-		if(size > 0) {
-			dataptr += size;
-			datalen -= size;
+	while(datalen > 0) {
+		ssize_t sent = send(sock, dataptr, datalen, 0);
+		
+		if(sent > 0) {
+			dataptr += sent;
+			datalen -= (SInt32)sent;
+			continue;
 		}
-		size = send(sock, dataptr, datalen, 0);
-		DebugLog(@"after retry size: %d", size);
+		
+		if(sent < 0 && errno == EINTR)
+			continue;
+		
+		if(sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			if(--stalledAttempts <= 0) {
+				success = NO;
+				break;
+			}
+			usleep(1000);
+			continue;
+		}
+		
+		success = NO;
+		break;
 	}
 	
 	[_lock unlock];
 	
-	if(retries <= 0) {
-		NSLog(@"Unable to send data: %@", self);
-		return kCFSocketError;
-	}
-
-	return noErr;
+	if(!success)
+		DebugLog(@"Unable to send data: %@", self);
+	
+	return success;
 }
 
 - (TPSocketState)socketState
@@ -515,6 +627,14 @@ static void _cfsocketCallback(CFSocketRef inCFSocketRef, CFSocketCallBackType in
 	DebugLog(@"socket %@ %@", self, dropped?@"dropped":@"closed");
 #endif
 
+	/* Wake the writer thread; it exits as soon as the current write finishes. */
+	[_sendCondition lock];
+	_stopSendThread = YES;
+	[_sendQueue removeAllObjects];
+	_sendQueueBytes = 0;
+	[_sendCondition broadcast];
+	[_sendCondition unlock];
+
 	if(_sourceRef != NULL) {
 		[self _setRunLoop:NULL];
 	}
@@ -531,6 +651,8 @@ static void _cfsocketCallback(CFSocketRef inCFSocketRef, CFSocketCallBackType in
 {
 	if([_delegate respondsToSelector:@selector(tcpSocket:gotData:)])
 		[_delegate tcpSocket:self gotData:(__bridge NSData*)data];
+	else
+		[_pendingReceivedData appendData:(__bridge NSData*)data];
 }
 
 - (void)_didSendData

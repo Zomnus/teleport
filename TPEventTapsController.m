@@ -23,6 +23,20 @@ int _CGSDefaultConnection();
 
 static TPEventTapsController * _eventTapsController = nil;
 
+/* Temporary self-test hooks (removed after validation). */
+@interface TPTapSelfTestListener : NSObject <TPEventsListener>
+@property (nonatomic, weak) TPEventTapsController * controller;
+@end
+
+@implementation TPTapSelfTestListener
+- (void)gotEventWithEventData:(NSData*)eventData {
+    self.controller.selfTestEventCount = self.controller.selfTestEventCount + 1;
+}
+- (void)gotEmergencyStopEvent {}
+- (BOOL)shouldStopWithEvent:(NSEvent*)event { return NO; }
+- (BOOL)isStopControlEvent:(NSEvent*)event { return NO; }
+@end
+
 static const char * eventTypeName[] =
 {
 	"NullEvent", "LMouseDown", "LMouseUp", "RMouseDown", "RMouseUp",
@@ -38,6 +52,7 @@ static const char * eventTypeName[] =
 
 - (void)_startGettingsEvents;
 - (void)_postEvent:(CGEventRef)event;
+- (void)_postEvent:(CGEventRef)event withTimestamp:(CGEventTimestamp)timestamp;
 
 - (BOOL)_shouldSkipFirstEvent:(id)e;
 - (BOOL)_isEmergencyStopEvent:(id)e;
@@ -80,17 +95,20 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 	NSLog(@"Callback: %@", [TPEventTapsController _eventNameFromType:type]);
 #endif
 
-	if(![[TPClientController defaultController] isControlling]) {
-		[self stopGettingEvents];
-		NSLog(@"eventCallback, _stopGettingEvents when not controlling. type=%d", type);
-	} else {
-		if(type >= kCGEventTapDisabledByTimeout) {
-			[self _startGettingsEvents];
-			NSLog(@"eventCallback, _startGettingsEvents again on type=%d", type);
-		}
-		else {
-			[self _sendEventToListener:(__bridge id)event];
-		}
+	if(type >= kCGEventTapDisabledByTimeout) {
+		[self _startGettingsEvents];
+		return NULL;
+	}
+	
+	if(![[TPClientController defaultController] isControlling] && !self->_selfTestActive) {
+		/* Never touch AppKit or the run loop from inside the tap callback:
+		   hand control back to the main thread. */
+		[self _requestStopFromCallback];
+		return NULL;
+	}
+	
+	@autoreleasepool {
+		[self _sendEventToListener:(__bridge id)event];
 	}
 	
 	return NULL;
@@ -126,54 +144,160 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 	CFRelease(propertyString);
 	
 	setCursorVisibility(NO);
+	[self invalidateScreenCache];
 	
-	if(_eventPort == NULL) {
-		CFRunLoopRef runLoop = CFRunLoopGetCurrent();
+	if(_eventPort != NULL) {
+		[self _startGettingsEvents];
+		return;
+	}
+	
+	if(_threadCondition == nil)
+		_threadCondition = [[NSCondition alloc] init];
+	
+	[_threadCondition lock];
+	_tapInstalled = NO;
+	_tapInstallSucceeded = NO;
+	_eventThread = [[NSThread alloc] initWithTarget:self selector:@selector(_eventThreadMain) object:nil];
+	[_eventThread setName:@"teleport.eventtap"];
+	[_eventThread start];
+	
+	while(!_tapInstalled)
+		[_threadCondition wait];
+	
+	BOOL installed = _tapInstallSucceeded;
+	[_threadCondition unlock];
+	
+	if(!installed) {
+		/* Fallback: keep the tap on the main run loop, but register it in common
+		   modes so that menu tracking / window dragging do not interrupt capture. */
+		NSLog(@"teleport: could not install event tap thread, falling back to main run loop");
+		[_threadCondition lock];
+		_eventThread = nil;
+		[_threadCondition unlock];
+		[self _installEventTapOnRunLoop:CFRunLoopGetCurrent() mode:kCFRunLoopCommonModes];
+	}
+}
 
-		_eventPort = CGEventTapCreate(kCGSessionEventTap,
-									  kCGHeadInsertEventTap,
-									  0,
-#if 0
-									  CGEventMaskBit(kCGEventLeftMouseDown)		|
-									  CGEventMaskBit(kCGEventLeftMouseUp)		|
-									  CGEventMaskBit(kCGEventRightMouseDown)	|
-									  CGEventMaskBit(kCGEventRightMouseUp)		|
-									  CGEventMaskBit(kCGEventMouseMoved)		|
-									  CGEventMaskBit(kCGEventLeftMouseDragged)	|
-									  CGEventMaskBit(kCGEventRightMouseDragged)	|
-									  CGEventMaskBit(kCGEventKeyDown)			|
-									  CGEventMaskBit(kCGEventKeyUp)				|
-									  CGEventMaskBit(kCGEventFlagsChanged)		|
-									  CGEventMaskBit(kCGEventScrollWheel)		|
-									  CGEventMaskBit(kCGEventTabletPointer)		|
-									  CGEventMaskBit(kCGEventTabletProximity)	|
-									  CGEventMaskBit(kCGEventOtherMouseDown)	|
-									  CGEventMaskBit(kCGEventOtherMouseUp)		|
-									  CGEventMaskBit(kCGEventOtherMouseDragged)	|
-									  CGEventMaskBit(NX_ZOOM),
-#else
-									  kCGEventMaskForAllEvents & ~(NX_KITDEFINEDMASK |
-																   NX_APPDEFINEDMASK),
-#endif
-									  eventCallback,
-									  (__bridge void *)(self));
-		if(_eventPort == NULL) {
-			NSLog(@"Can't create event port");
-			return;
+- (void)_eventThreadMain
+{
+	@autoreleasepool {
+		CFRunLoopRef runLoop = CFRunLoopGetCurrent();
+		BOOL installed = [self _installEventTapOnRunLoop:runLoop mode:kCFRunLoopDefaultMode];
+		
+		[_threadCondition lock];
+		_eventRunLoop = runLoop;
+		_tapInstallSucceeded = installed;
+		_tapInstalled = YES;
+		[_threadCondition broadcast];
+		[_threadCondition unlock];
+		
+		if(installed) {
+			CFRunLoopRun();
+			[self _teardownEventTap];
 		}
 		
-		CFRunLoopSourceRef eventSrc = CFMachPortCreateRunLoopSource(NULL, _eventPort, 0);
-		if(eventSrc == NULL) {
-			NSLog(@"Can't create event src");
-		}
-		else {
-			CFRunLoopAddSource(runLoop, eventSrc, kCFRunLoopDefaultMode);
-			CFRelease(eventSrc);
-		}
+		[_threadCondition lock];
+		_eventRunLoop = NULL;
+		_eventThread = nil;
+		_tapInstalled = NO;
+		[_threadCondition broadcast];
+		[_threadCondition unlock];
 	}
-	else {
-		[self _startGettingsEvents];
+}
+
+- (BOOL)_installEventTapOnRunLoop:(CFRunLoopRef)runLoop mode:(CFStringRef)mode
+{
+	CFMachPortRef port = CGEventTapCreate(kCGSessionEventTap,
+										  kCGHeadInsertEventTap,
+										  0,
+										  kCGEventMaskForAllEvents & ~(NX_KITDEFINEDMASK |
+																	   NX_APPDEFINEDMASK),
+										  eventCallback,
+										  (__bridge void *)(self));
+	if(port == NULL) {
+		NSLog(@"Can't create event port");
+		return NO;
 	}
+	
+	CFRunLoopSourceRef eventSrc = CFMachPortCreateRunLoopSource(NULL, port, 0);
+	if(eventSrc == NULL) {
+		NSLog(@"Can't create event src");
+		CFRelease(port);
+		return NO;
+	}
+	
+	CFRunLoopAddSource(runLoop, eventSrc, mode);
+	
+	_eventPort = port;
+	_eventSourceRef = eventSrc;
+	_eventRunLoop = runLoop;
+	
+	return YES;
+}
+
+- (void)_teardownEventTap
+{
+	if(_eventSourceRef != NULL) {
+		if(_eventRunLoop != NULL) {
+			CFRunLoopRemoveSource(_eventRunLoop, _eventSourceRef, kCFRunLoopDefaultMode);
+			CFRunLoopRemoveSource(_eventRunLoop, _eventSourceRef, kCFRunLoopCommonModes);
+		}
+		CFRelease(_eventSourceRef);
+		_eventSourceRef = NULL;
+	}
+	
+	if(_eventPort != NULL) {
+		CGEventTapEnable(_eventPort, false);
+		CFMachPortInvalidate(_eventPort);
+		CFRelease(_eventPort);
+		_eventPort = NULL;
+	}
+}
+
+- (void)_requestStopFromCallback
+{
+	@synchronized(self) {
+		if(_stopRequestedFromCallback)
+			return;
+		_stopRequestedFromCallback = YES;
+	}
+	
+	dispatch_async(dispatch_get_main_queue(), ^{
+		@synchronized(self) {
+			_stopRequestedFromCallback = NO;
+		}
+		[self stopGettingEvents];
+	});
+}
+
+- (void)runSelfTestForSeconds:(double)seconds
+{
+	_selfTestActive = YES;
+	self.selfTestEventCount = 0;
+	
+	TPTapSelfTestListener * listener = [[TPTapSelfTestListener alloc] init];
+	listener.controller = self;
+	
+	[self startGettingEventsForListener:listener onScreen:[NSScreen mainScreen]];
+	
+	/* Feed synthetic events so the capture -> encode -> listener path is
+	   exercised even when nobody touches the mouse. */
+	for(int i = 0; i < 5; i++) {
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((0.4 + 0.2 * i) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+			CGEventRef synthetic = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, CGPointMake(300 + 20 * i, 300), 0);
+			if(synthetic != NULL) {
+				CGEventPost(kCGHIDEventTap, synthetic);
+				CFRelease(synthetic);
+			}
+		});
+	}
+	
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+		[self stopGettingEvents];
+		self->_selfTestActive = NO;
+		NSLog(@"TAP SELFTEST RESULT: events=%ld threadAlive=%d", (long)self.selfTestEventCount, self->_eventThread != nil);
+		[NSApp terminate:nil];
+	});
 }
 
 - (void)_sendEventToListener:(id)event
@@ -192,11 +316,44 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 
 - (void)_stopGettingEvents
 {
+	if([NSThread currentThread] == _eventThread) {
+		dispatch_async(dispatch_get_main_queue(), ^{
+			[self _stopGettingEvents];
+		});
+		return;
+	}
+	
 	if(_eventPort != NULL && CGEventTapIsEnabled(_eventPort)) {
 		CGEventTapEnable(_eventPort, false);
 	}
 	
-	[(TPMainController*)[NSApp delegate] leaveFrontmost];
+	BOOL mainThreadFallback = (_eventThread == nil && _eventPort != NULL);
+	
+	if(_eventThread != nil && _eventRunLoop != NULL) {
+		CFRunLoopStop(_eventRunLoop);
+		CFRunLoopWakeUp(_eventRunLoop);
+		
+		[_threadCondition lock];
+		NSDate * deadline = [NSDate dateWithTimeIntervalSinceNow:0.5];
+		while(_eventThread != nil && [deadline timeIntervalSinceNow] > 0)
+			[_threadCondition waitUntilDate:deadline];
+		BOOL stillRunning = (_eventThread != nil);
+		[_threadCondition unlock];
+		
+		if(stillRunning)
+			NSLog(@"teleport: event tap thread did not stop in time");
+	}
+	else if(mainThreadFallback) {
+		[self _teardownEventTap];
+	}
+	
+	TPMainController * mainController = (TPMainController*)[NSApp delegate];
+	if([NSThread isMainThread])
+		[mainController leaveFrontmost];
+	else
+		dispatch_async(dispatch_get_main_queue(), ^{
+			[mainController leaveFrontmost];
+		});
 }
 
 - (void)cleanupGettingEvents
@@ -213,11 +370,8 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 - (void)startPostingEvents
 {
 	_eventSource = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
-	
-//	CGEventSourceSetLocalEventsFilterDuringSuppressionState(_eventSource, 0, kCGEventSuppressionStateSuppressionInterval);
-	
-//	_eventSource = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
-//	_eventSource = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
+	_mouseLocationValid = NO;
+	[self invalidateScreenCache];
 }
 
 - (void)stopPostingEvents
@@ -226,24 +380,24 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 		CFRelease(_eventSource);
 		_eventSource = NULL;
 	}
+	
+	_mouseLocationValid = NO;
 }
 
 - (void)_postEvent:(CGEventRef)event
 {
-	CGEventSetTimestamp(event, CGSCurrentEventTimestamp());
-//	CGEventSourceStateID sourceState = CGEventSourceGetSourceStateID(_eventSource);
-//	CGEventFlags flags = CGEventSourceFlagsState(sourceState);
-//	DebugLog(@"event flags=%lld", CGEventGetFlags(event));
-//	DebugLog(@"before source flags=%lld", flags);
-//	CGEventSetFlags(event, flags);
-//	DebugLog(@"post event %s", eventTypeName[eventType]);
+	[self _postEvent:event withTimestamp:CGSCurrentEventTimestamp()];
+}
+
+- (void)_postEvent:(CGEventRef)event withTimestamp:(CGEventTimestamp)timestamp
+{
+	CGEventSetTimestamp(event, timestamp);
 	
 	if(_eventSource != NULL) {
 		CGEventSetSource(event, _eventSource);
 	}
 	
 	CGEventPost(kCGSessionEventTap, event);
-//	DebugLog(@"after source flags=%lld", CGEventSourceFlagsState(sourceState));
 }
 
 
@@ -285,6 +439,12 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 	CGEventRef event = (__bridge CGEventRef)e;
 	
 	NSMutableData * eventData = [[NSMutableData alloc] init];
+	
+	/* Prefix: age of the event in nanoseconds, so that the receiver can
+	   restore the original inter-event rhythm without clock synchronisation. */
+	uint64_t age = [self _eventAgeForEvent:e];
+	uint64_t swappedAge = NSSwapHostLongLongToBig(age);
+	[eventData appendData:[NSData dataWithBytes:&swappedAge length:sizeof(uint64_t)]];
 	
 	CGEventType eventType = CGEventGetType(event);
 	CGEventType swappedEventType = NSSwapHostIntToBig(eventType);
@@ -387,6 +547,10 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 	bool down = false;
 	
 	CGEventRef event = NULL;
+	
+	uint64_t swappedAge;
+	[eventData _readBytes:&swappedAge withSize:sizeof(uint64_t) atPos:&pos];
+	uint64_t age = NSSwapBigLongLongToHost(swappedAge);
 	
 	int swappedEventType;
 	[eventData _readBytes:&swappedEventType withSize:sizeof(int) atPos:&pos];
@@ -509,7 +673,7 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 		
 		CGEventSetFlags(event, flags);
 		
-		[self _postEvent:event];
+		[self _postEvent:event withTimestamp:[self _timestampForEventAge:age]];
 		CFRelease(event);
 	}
 }

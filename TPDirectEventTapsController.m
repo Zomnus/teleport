@@ -82,25 +82,37 @@ static TPDirectEventTapsController * _eventTapsController = nil;
 {
 	CGEventRef event = (__bridge CGEventRef)e;
 
-	
-//    CGSEventRecord eventRecord;
-//    
-//    uint32_t size = CGEventGetEventRecordSize(event);
-//	
-//    CGEventGetEventRecord(event, &eventRecord, size);
-//    eventRecord.ioEventData = NULL;
-//    
-//    CGEventSetEventRecord(event, &eventRecord, size);
-//	
 	NSData * eventData = (NSData*)CFBridgingRelease(CGEventCreateData(NULL, event));
+	if(eventData == nil)
+		return nil;
 	
-	return eventData;
+	/* Prefix the original event age so the receiver can restore its timestamp
+	   (CGEvent timestamps are relative to the sender's boot, not transferable). */
+	uint64_t age = [self _eventAgeForEvent:e];
+	uint64_t swappedAge = NSSwapHostLongLongToBig(age);
+	
+	NSMutableData * payload = [[NSMutableData alloc] initWithCapacity:[eventData length] + TP_EVENT_AGE_LENGTH];
+	[payload appendBytes:&swappedAge length:sizeof(uint64_t)];
+	[payload appendData:eventData];
+	
+	return payload;
 }
 
 - (void)_postEventWithEventData:(NSData*)eventData
 {
-	if([eventData length] == 0) return;
-	CGEventRef event = CGEventCreateFromData(NULL, (__bridge CFDataRef)eventData);
+	if([eventData length] < TP_EVENT_AGE_LENGTH) return;
+	
+	int pos = 0;
+	uint64_t swappedAge;
+	[eventData _readBytes:&swappedAge withSize:sizeof(uint64_t) atPos:&pos];
+	uint64_t age = NSSwapBigLongLongToHost(swappedAge);
+	
+	NSData * rawEventData = [eventData subdataWithRange:NSMakeRange(TP_EVENT_AGE_LENGTH, [eventData length] - TP_EVENT_AGE_LENGTH)];
+	if([rawEventData length] == 0) return;
+	
+	CGEventRef event = CGEventCreateFromData(NULL, (__bridge CFDataRef)rawEventData);
+	if(event == NULL) return;
+	
 	CGEventType eventType = CGEventGetType(event);
 	
 	//DebugLog(@"post event %@", [TPEventTapsController _eventNameFromType:eventType]);
@@ -119,7 +131,7 @@ static TPDirectEventTapsController * _eventTapsController = nil;
 	
 	CGEventSetLocation(event, _currentMouseLocation);
 		
-	[self _postEvent:event];
+	[self _postEvent:event withTimestamp:[self _timestampForEventAge:age]];
 	CFRelease(event);
 }
 

@@ -601,10 +601,15 @@ void TPSleepCallback(void * refCon, io_service_t service, natural_t messageType,
 
 - (void)gotEmergencyStopEvent
 {
-	[self stopControl];
+	if([NSThread isMainThread])
+		[self stopControl];
+	else
+		dispatch_async(dispatch_get_main_queue(), ^{
+			[self stopControl];
+		});
 }
 
-- (BOOL)shouldStopWithEvent:(NSEvent*)event
+- (BOOL)isStopControlEvent:(NSEvent*)event
 {
 	if([event type] == NSKeyDown) {
 		TPRemoteHost * connectedHost = [[self currentConnection] connectedHost];
@@ -612,10 +617,19 @@ void TPSleepCallback(void * refCon, io_service_t service, natural_t messageType,
 		
 		if(keyCombo != nil) {
 			if(([keyCombo keyCode] == [event keyCode]) && ([keyCombo modifiers] == [PTKeyBroadcaster cocoaModifiersAsCarbonModifiers:[event modifierFlags]])) {
-				[self stopControlWithDisconnect:DISCONNECT_WHEN_STOP_CONTROL];
 				return YES;
 			}
 		}		
+	}
+	
+	return NO;
+}
+
+- (BOOL)shouldStopWithEvent:(NSEvent*)event
+{
+	if([self isStopControlEvent:event]) {
+		[self stopControlWithDisconnect:DISCONNECT_WHEN_STOP_CONTROL];
+		return YES;
 	}
 	
 	return NO;

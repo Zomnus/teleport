@@ -20,6 +20,8 @@
 
 #define THREADED_EVENT_POSTING 0
 
+extern CGEventTimestamp CGSCurrentEventTimestamp(void);
+
 @implementation TPEventsController
 
 + (TPEventsController*)defaultController
@@ -55,6 +57,7 @@
 {
 	_lastPostedEventDate = 0.0;
 	_eventsListener = eventsListener;
+	[self invalidateScreenCache];
 	
 	[self _startGettingEventsOnScreen:screen];
 }
@@ -73,7 +76,24 @@
 		}
 		else {
 			NSEvent * nsEvent = [self _nsEventFromEvent:event];
-			if(![eventsListener shouldStopWithEvent:nsEvent]) {
+			
+			/* The stop check must not mutate UI state from the event tap thread.
+			   Ask the listener with a side-effect free method, then perform the
+			   actual stop on the main thread. */
+			BOOL shouldStop = NO;
+			if([eventsListener respondsToSelector:@selector(isStopControlEvent:)]) {
+				shouldStop = [(id<TPEventsListener>)eventsListener isStopControlEvent:nsEvent];
+			}
+			else {
+				shouldStop = [eventsListener shouldStopWithEvent:nsEvent];
+			}
+			
+			if(shouldStop) {
+				dispatch_async(dispatch_get_main_queue(), ^{
+					[eventsListener shouldStopWithEvent:nsEvent];
+				});
+			}
+			else {
 				NSData * eventData = [self _eventDataFromEvent:event];
 				[eventsListener gotEventWithEventData:eventData];
 			}
@@ -112,6 +132,8 @@
 - (void)startPostingEvents
 {
 	_lastPostedEventDate = 0.0;
+	_mouseLocationValid = NO;
+	[self invalidateScreenCache];
 }
 
 - (void)stopPostingEvents
@@ -160,16 +182,19 @@
 - (void)warpMouseToPosition:(NSPoint)position
 {
 	_currentMouseLocation = *(CGPoint*)&position;
+	_mouseLocationValid = YES;
 }
 
 - (void)mouseDownAtPosition:(NSPoint)position
 {
 	_currentMouseLocation = *(CGPoint*)&position;
+	_mouseLocationValid = YES;
 }
 
 - (void)mouseUpAtPosition:(NSPoint)position
 {
 	_currentMouseLocation = *(CGPoint*)&position;
+	_mouseLocationValid = YES;
 }
 
 - (BOOL)_shouldSkipFirstEvent:(id)event
@@ -194,59 +219,118 @@
 
 - (void)_updateMouseLocationWithMouseDelta:(TPMouseDelta)mouseDelta
 {
-	NSArray * screens = [[TPLocalHost localHost] screens];
-	NSRect mainScreenRect = [screens[0] frame];
+	[self _rebuildScreenCacheIfNeeded];
 	
-	_currentMouseLocation = [NSEvent mouseLocation];
+	if(!_mouseLocationValid) {
+		NSPoint location = [NSEvent mouseLocation];
+		_currentMouseLocation.x = location.x;
+		_currentMouseLocation.y = _cachedMainScreenHeight - location.y;
+		_mouseLocationValid = YES;
+	}
+	
+	/* Integrate deltas only: never re-read the system cursor position here.
+	   CGEventPost is asynchronous, so reading it per event can double-count
+	   movement and cause jitter. */
 	_currentMouseLocation.x += mouseDelta.x;
-	_currentMouseLocation.y = (NSHeight(mainScreenRect) - _currentMouseLocation.y);
 	_currentMouseLocation.y += mouseDelta.y;
 	
-	NSEnumerator * screenEnum = [screens objectEnumerator];
-	NSScreen * screen;
-	unsigned i = 0;
-	
-	while((screen = [screenEnum nextObject])) {
-		NSRect screenFrame = [screen frame];
-		//	DebugLog(@"point=(%d,%d), screenFrame=%@", point.x, point.y, NSStringFromRect(screenFrame));
-		CGPoint relativePoint = _currentMouseLocation;
-		relativePoint.x -= NSMinX(screenFrame);
-		relativePoint.y -= (NSHeight(mainScreenRect) - NSMaxY(screenFrame));
+	NSUInteger i = 0;
+	for(NSValue * value in _cachedScreenFrames) {
+		NSRect screenFrame = [value rectValue];
+		NSPoint relativePoint = CGPointMake(_currentMouseLocation.x - NSMinX(screenFrame),
+											_currentMouseLocation.y - NSMinY(screenFrame));
 		
 		if(relativePoint.x >= 0 && relativePoint.y >= 0 && relativePoint.x < NSWidth(screenFrame) && relativePoint.y < NSHeight(screenFrame)) {
-			_currentScreenIndex = i;
+			_currentScreenIndex = (int)i;
 			return;
 		}
 		i++;
 	}
 	
-	/* Mouse cursor is outside */
-	screen = screens[_currentScreenIndex];
-	NSRect screenFrame = [screen frame];
-	CGPoint relativePoint = _currentMouseLocation;
-	relativePoint.x -= NSMinX(screenFrame);
-	relativePoint.y -= (NSHeight(mainScreenRect) - NSMaxY(screenFrame));
+	/* Mouse cursor is outside: clamp it to the current screen. */
+	NSUInteger screenCount = [_cachedScreenFrames count];
+	if(screenCount == 0)
+		return;
 	
-	relativePoint.x = MAX(0, MIN(relativePoint.x, NSWidth(screenFrame) - 1.0));
-	relativePoint.y = MAX(0, MIN(relativePoint.y, NSHeight(screenFrame) - 1.0));
+	if(_currentScreenIndex < 0 || (NSUInteger)_currentScreenIndex >= screenCount)
+		_currentScreenIndex = 0;
 	
-	_currentMouseLocation = relativePoint;
-	_currentMouseLocation.x += NSMinX(screenFrame);
-	_currentMouseLocation.y += (NSHeight(mainScreenRect) - NSMaxY(screenFrame));
-
+	NSRect screenFrame = [[_cachedScreenFrames objectAtIndex:_currentScreenIndex] rectValue];
+	_currentMouseLocation.x = MAX(NSMinX(screenFrame), MIN(_currentMouseLocation.x, NSMaxX(screenFrame) - 1.0));
+	_currentMouseLocation.y = MAX(NSMinY(screenFrame), MIN(_currentMouseLocation.y, NSMaxY(screenFrame) - 1.0));
+	
 	// When locked, HotBorder will never receiver mouseEnter events.
 	// Work around to make it possible to move back to the client.
-	if ([TPScreenLockWatcher isLocked]) {
+	if([TPScreenLockWatcher isLocked]) {
 		TPHotBorder *border = [[TPServerController defaultController] currentHotBorder];
+		NSScreen * screen = (NSUInteger)_currentScreenIndex < [_cachedScreens count] ? [_cachedScreens objectAtIndex:_currentScreenIndex] : nil;
 		if (screen == [border screen]) {
 			// _currentMouseLocation is relative to the left-top corner of the main screen.
 			// while borderRect is relative to the left-bottom corner of the main screen.
-			CGPoint mouseLocationInvertY = CGPointMake(_currentMouseLocation.x, NSHeight(mainScreenRect) - _currentMouseLocation.y);
+			CGPoint mouseLocationInvertY = CGPointMake(_currentMouseLocation.x, _cachedMainScreenHeight - _currentMouseLocation.y);
 			if (CGRectContainsPoint(border.frame, mouseLocationInvertY)) {
 				[[TPServerController defaultController] stopControl];
 			}
 		}
 	}
+}
+
+- (void)invalidateScreenCache
+{
+	_screenCacheValid = NO;
+}
+
+- (uint64_t)_eventAgeForEvent:(id)event
+{
+	CGEventRef cgEvent = (__bridge CGEventRef)event;
+	CGEventTimestamp timestamp = CGEventGetTimestamp(cgEvent);
+	CGEventTimestamp now = CGSCurrentEventTimestamp();
+	
+	if(timestamp == 0 || now <= timestamp)
+		return 0;
+	
+	uint64_t age = (uint64_t)(now - timestamp);
+	/* Clamp to one second: a bogus age must not push timestamps far into the
+	   past, which would confuse momentum/velocity handling on the receiver. */
+	if(age > 1000000000ULL)
+		age = 1000000000ULL;
+	
+	return age;
+}
+
+- (CGEventTimestamp)_timestampForEventAge:(uint64_t)age
+{
+	CGEventTimestamp now = CGSCurrentEventTimestamp();
+	return (age >= now) ? now : (now - age);
+}
+
+- (void)_rebuildScreenCacheIfNeeded
+{
+	if(_screenCacheValid)
+		return;
+	
+	NSArray * screens = [NSScreen screens];
+	NSScreen * mainScreen = [screens count] > 0 ? [screens objectAtIndex:0] : nil;
+	_cachedMainScreenHeight = (mainScreen != nil) ? NSHeight([mainScreen frame]) : 0.0;
+	
+	NSMutableArray * frames = [NSMutableArray arrayWithCapacity:[screens count]];
+	NSEnumerator * screenEnum = [screens objectEnumerator];
+	NSScreen * screen;
+	
+	while((screen = [screenEnum nextObject]) != nil) {
+		NSRect frame = [screen frame];
+		/* Store frames in the top-left origin space used by
+		   _currentMouseLocation and CGEvent deltas. */
+		NSRect flippedFrame = NSMakeRect(NSMinX(frame),
+										 _cachedMainScreenHeight - NSMaxY(frame),
+										 NSWidth(frame),
+										 NSHeight(frame));
+		[frames addObject:[NSValue valueWithRect:flippedFrame]];
+	}
+	
+	_cachedScreens = [screens copy];
+	_cachedScreenFrames = frames;
+	_screenCacheValid = YES;
 }
 
 - (BOOL)event:(NSEvent*)event hasRequiredKeyIfNeeded:(BOOL)needed withTag:(NSEventType)tag

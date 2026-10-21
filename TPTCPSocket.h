@@ -40,6 +40,17 @@ typedef NS_ENUM(NSInteger, TPSocketState) {
 	BOOL _noDelay;
 	NSLock * _lock;
 	
+	NSMutableArray * _sendQueue;
+	NSCondition * _sendCondition;
+	NSUInteger _sendQueueBytes;
+	BOOL _sendThreadRunning;
+	BOOL _stopSendThread;
+	BOOL _sendFailed;
+	
+	/* Data can arrive before a delegate is attached (for sockets accepted from
+	   a listening socket). Buffer it instead of dropping it. */
+	NSMutableData * _pendingReceivedData;
+	
 	TPSocketState _socketState;
 }
 
@@ -65,6 +76,10 @@ typedef NS_ENUM(NSInteger, TPSocketState) {
 - (void)close;
 
 - (void)_setRunLoop:(CFRunLoopRef)runLoop;
+
+/* Subclasses override this to provide the actual transport (e.g. TLS). It is
+   always called on the dedicated writer thread, never on the main thread. */
+- (BOOL)_writeData:(NSData*)data;
 
 @end
 
