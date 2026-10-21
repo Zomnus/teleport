@@ -692,3 +692,45 @@ CFRunLoopAddSource(runLoop, eventSrc, kCFRunLoopCommonModes);
 | 抑制期（Inhibition Period） | 光标进入热区后需等待的时间，防误触 |
 | 直接事件路径 | 用 `CGEventCreateData` 整事件序列化，仅同大版本 OS 可用 |
 | 兼容事件路径 | 手写字段序列化，跨 OS 版本可用 |
+
+---
+
+## 附录 D：v1.4 实施记录
+
+### D.1 已实施
+
+| 阶段 | 改动 | 关键位置 |
+|---|---|---|
+| 一 | 事件采集迁移到专用线程（自带 RunLoop），主线程仅负责启动/停止；失败时回退到主 RunLoop 并使用 `kCFRunLoopCommonModes` | `TPEventTapsController.m` `_eventThreadMain` / `_installEventTapOnRunLoop:mode:` |
+| 一 | `TPTCPSocket` 改为有界异步写队列 + 专用写线程；`sendData:` 只入队，不再阻塞调用方；新增 `SO_SNDTIMEO`、`SO_KEEPALIVE` | `TPTCPSocket.m` `sendData:` / `_sendThreadMain` / `_writeData:` |
+| 一 | TLS 写入改为覆盖 `_writeData:`，`errSSLWouldBlock` 重试而非直接断线 | `TPTCPSecureSocket.m` |
+| 一 | 接收数据在 delegate 挂载前先缓存，挂载后回放（修复 accept 瞬间丢包） | `TPTCPSocket.m` `_receivedData:` / `setDelegate:` |
+| 一 | 虚拟光标改为纯增量积分，屏幕几何缓存，仅在显示器参数变化时重建 | `TPEventsController.m` `_updateMouseLocationWithMouseDelta:` / `_rebuildScreenCacheIfNeeded` |
+| 一 | 每个事件前缀 8 字节"事件年龄"，接收端据此恢复时间戳（协议 20） | `TPEventsController.m` `_eventAgeForEvent:`、`TPEventTapsController.m`、`TPDirectEventTapsController.m` |
+| 二 | 鼠标移动按 4ms 窗口合并，累积 delta 后一次发送（发送端优化，接收端无需改动） | `TPEventsController.m` `_coalesceMouseEvent:` / `_flushPendingMouseEvent` |
+| 二 | 热区激活可取消：光标快速划过边缘不再遗留激活状态；默认抑制期 0.2s → 0.1s | `TPHotBorder.m` `cancelDelayedActivate`、`TPPreferencesManager.m` |
+| 三 | `flagsChanged` 透传 keyCode，避免修饰键在部分应用中识别异常（协议 21） | `TPEventTapsController.m` 序列化/反序列化 |
+| 三 | 版本号升级至 1.4 | `teleport.xcodeproj/project.pbxproj` |
+
+### D.2 验证结果（本机）
+
+| 测试 | 结果 |
+|---|---|
+| 传输层回环（20,000 条 32B 消息，顺序+完整性） | PASS，约 98 万条/秒，调用方入队耗时 10ms 级 |
+| 采集自检（合成鼠标事件） | 200 个快速事件合并为 28 条消息（≈7:1）；停止后采集线程已退出，无死锁 |
+| Release 冒烟（20s 空闲） | CPU 0%，无崩溃日志 |
+| 产物 | `arm64 + x86_64` 通用二进制，ad-hoc 签名验证通过，zip 解包后签名有效 |
+
+### D.3 暂缓项（评估后认为风险/收益不匹配）
+
+| 项 | 原因 |
+|---|---|
+| P1-3 连接预热与 A↔B 快速复用 | 需要同时改造客户端空闲连接池与服务端连接生命周期，缺少第二台 Mac 做端到端验证，贸然改动可能导致"连上了但控制状态错乱" |
+| P1-5 键鼠/控制双通道或 UDP 输入通道 | 事件已按 4ms 合并，单连接队头阻塞影响显著下降；UDP 通道需处理 NAT、加密与丢包重排，复杂度高 |
+| TLS 证书链校验恢复、`NSArchiver` 迁移 | 会破坏现有 TOFU 信任关系或协议兼容性，应作为独立的破坏性升级（协议 22+）规划并配套迁移 UI |
+
+### D.4 升级注意
+
+- `PROTOCOL_VERSION` 已升至 **21**，两台 Mac 必须同时升级到 v1.4，否则会提示协议版本不匹配（这是预期行为，避免新旧混用时事件格式错乱）。
+- 首次运行仍需在"系统设置 → 隐私与安全性 → 辅助功能"授权。
+- 建议在两台真机上补测：1000Hz 鼠标 p99、Wi-Fi 丢包 1%–5%、菜单/窗口拖拽期间的控制连续性、混合 DPI 双屏边界切换。

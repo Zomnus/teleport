@@ -1,6 +1,6 @@
 /* teleport protocol definitions */
 
-#define PROTOCOL_VERSION 20
+#define PROTOCOL_VERSION 21
 
 typedef NS_ENUM(NSInteger, TPMsgType) {
 	TPIdentificationMsgType,

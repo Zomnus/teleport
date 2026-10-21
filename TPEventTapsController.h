@@ -22,10 +22,6 @@
 	BOOL _tapInstalled;
 	BOOL _tapInstallSucceeded;
 	BOOL _stopRequestedFromCallback;
-	BOOL _selfTestActive;
 }
-
-@property (atomic) NSInteger selfTestEventCount;
-- (void)runSelfTestForSeconds:(double)seconds;
 
 @end
