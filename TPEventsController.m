@@ -186,23 +186,26 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 		sender = _pointerDeltaSender;
 	}
 	
+	uint8_t buttons = 0;
+	switch(_pendingMouseType) {
+		case kCGEventLeftMouseDragged:
+			buttons = 0x1;
+			break;
+		case kCGEventRightMouseDragged:
+			buttons = 0x2;
+			break;
+		case kCGEventOtherMouseDragged:
+			buttons = 0x4;
+			break;
+		default:
+			break;
+	}
+	
 	BOOL sentOverPointerChannel = NO;
-	if(sender != nil) {
-		uint8_t buttons = 0;
-		switch(_pendingMouseType) {
-			case kCGEventLeftMouseDragged:
-				buttons = 0x1;
-				break;
-			case kCGEventRightMouseDragged:
-				buttons = 0x2;
-				break;
-			case kCGEventOtherMouseDragged:
-				buttons = 0x4;
-				break;
-			default:
-				break;
-		}
-		
+	if(sender != nil && buttons == 0) {
+		/* Only hover movement uses the lossy channel. A drag must keep the
+		   exact down/drag/up ordering and the original event flags, so it stays
+		   on the reliable TCP stream. */
 		TPMouseDelta delta = { deltaX, deltaY };
 		uint64_t age = [self _eventAgeForEvent:(__bridge id)event];
 		
@@ -514,6 +517,10 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 		return;
 	
 	CGEventSetType(event, type);
+	/* Keep the delta fields consistent with the movement: some drag handling
+	   relies on them, not only on the absolute location. */
+	CGEventSetIntegerValueField(event, kCGMouseEventDeltaX, delta.x);
+	CGEventSetIntegerValueField(event, kCGMouseEventDeltaY, delta.y);
 	[self _postEvent:event withTimestamp:[self _timestampForEventAge:(uint64_t)delta.ageMs * 1000000ULL]];
 	CFRelease(event);
 }
