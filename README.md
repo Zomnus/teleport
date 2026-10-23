@@ -1,16 +1,16 @@
 # Teleport
 ## A Virtual KVM for macOS
 
-[![Release](https://img.shields.io/badge/release-v1.4.3-blue)](https://github.com/Zomnus/teleport/releases/latest)
+[![Release](https://img.shields.io/badge/release-v1.4.6-blue)](https://github.com/Zomnus/teleport/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-macOS%2012%2B-lightgrey)](#installation)
 
 Use one keyboard and pointing device to control multiple Macs.
 
 ---
 
-## 本次优化说明（v1.4 → v1.4.3）
+## 本次优化说明（v1.4 → v1.4.6）
 
-本仓库基于 [abyssoft/teleport](https://github.com/abyssoft/teleport) 的公开源码，针对两台 Mac 之间切换键鼠时的「顺滑度」完成了一轮性能优化与稳定性修复，当前版本为 **v1.4.3**。
+本仓库基于 [abyssoft/teleport](https://github.com/abyssoft/teleport) 的公开源码，针对两台 Mac 之间切换键鼠时的「顺滑度」完成了一轮性能优化与稳定性修复，当前版本为 **v1.4.6**。
 
 完整的技术分析、延迟拆解、风险与实施记录见：
 
@@ -64,10 +64,31 @@ Use one keyboard and pointing device to control multiple Macs.
 - 保持 1.4.2 的宽事件掩码：触控板手势等私有事件类型必须继续被捕获，否则手势会落在本机执行。
 - Settings 选项卡底部显示当前版本号。
 
+#### v1.4.4：服务端注入移出主线程
+
+- 接收端的事件解码、虚拟光标积分与 `CGEventPost` 从 CFSocket 回调所在的主 RunLoop 移到专用串行队列（`QOS_CLASS_USER_INTERACTIVE`），主线程忙于 UI 或显示重配时不再推迟注入。
+- 屏幕几何只在主线程查询，注入队列读取不可变快照；越界回切检测涉及 AppKit，仍交回主线程执行。
+- `startPostingEvents` / `stopPostingEvents` 与光标 warp 用同步派发，保证与事件严格同序。
+
+#### v1.4.5：切换过渡期补发 + 可选 UDP 指针通道
+
+- 越过边缘发出控制请求时即开始缓存移动（上限 80ms / 48 条），控制确认后按原时间戳顺序补发；失败、超时或被拒绝则丢弃。只补发移动，点击和按键不补发，不会重复输入。
+- 新增可选 UDP 指针通道（`COMMAND_PORT + 2`）：键、点击、滚轮仍走 TCP 保证有序，**悬停移动**可走 UDP，单个丢包不再阻塞后续输入。
+  - 协商方式：服务端在原有的控制成功消息里附带每次会话随机的 token，旧客户端会忽略这段附加数据。
+  - 自愈回落：客户端发 HELLO 等待 ACK（最多约 400ms），收不到就整场继续走 TCP；防火墙拦截或对端版本不支持时行为与之前完全一致。
+  - 接收端按序号丢弃过期/乱序包，并在应用任何 TCP 事件之前排空已到达的移动，保证点击落在用户看到的位置。
+- `PROTOCOL_VERSION` 仍为 21，1.4.2 ~ 1.4.6 可互通。
+
+#### v1.4.6 修复
+
+- 按住鼠标的拖拽重新走 TCP：UDP 增量包无法还原原始按键标志与严格顺序，1.4.5 会导致窗口拖不动。悬停移动仍走 UDP。
+- 控制期间每秒检查一次光标可见性：被全屏应用或 Space 切换重新显示时再次隐藏；隐藏次数计入恢复计数，结束控制时按次数还原，不会出现控制结束后光标消失的问题。
+
 ### 兼容性提示
 
 - `PROTOCOL_VERSION = 21`：两台 Mac 必须同时升级到 v1.4.x，否则会提示协议版本不匹配（预期行为，避免新旧混用导致事件格式错乱）。
-- v1.4.3 未改动协议，可与 v1.4.2 互通。
+- v1.4.4 ~ v1.4.6 均未改动协议，与 v1.4.2 / v1.4.3 可互通。
+- UDP 指针通道是可选项：两端都升级时自动启用，任一条件不满足（旧版本、防火墙、端口占用）都会自动回落到纯 TCP，不需要手动配置。
 - 首次运行仍需在「系统设置 → 隐私与安全性 → 辅助功能」中授权。
 
 ---
