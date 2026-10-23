@@ -111,21 +111,11 @@ Use one keyboard and pointing device to control multiple Macs.
 
 ### Installation
 
-#### Manual
-
 1. Download the [latest release](https://github.com/Zomnus/teleport-pro/releases/latest).
 2. Unzip the archive.
 3. Drag `teleport-pro.app` to `/Applications`.
 
 The release archive is a universal binary (`arm64` + `x86_64`), ad-hoc signed, and requires macOS 12 or later.
-
-#### Homebrew
-
-```bash
-brew install --cask abyssoft-teleport
-```
-
-> Note: the Homebrew cask installs the upstream release, not this fork's build.
 
 ### Project status
 
