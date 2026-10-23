@@ -1,16 +1,16 @@
 # Teleport
 ## A Virtual KVM for macOS
 
-[![Release](https://img.shields.io/badge/release-v1.4.2-blue)](https://github.com/Zomnus/teleport/releases/latest)
+[![Release](https://img.shields.io/badge/release-v1.4.3-blue)](https://github.com/Zomnus/teleport/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-macOS%2012%2B-lightgrey)](#installation)
 
 Use one keyboard and pointing device to control multiple Macs.
 
 ---
 
-## 本次优化说明（v1.4 → v1.4.2）
+## 本次优化说明（v1.4 → v1.4.3）
 
-本仓库基于 [abyssoft/teleport](https://github.com/abyssoft/teleport) 的公开源码，针对两台 Mac 之间切换键鼠时的「顺滑度」完成了一轮性能优化与稳定性修复，当前版本为 **v1.4.2**。
+本仓库基于 [abyssoft/teleport](https://github.com/abyssoft/teleport) 的公开源码，针对两台 Mac 之间切换键鼠时的「顺滑度」完成了一轮性能优化与稳定性修复，当前版本为 **v1.4.3**。
 
 完整的技术分析、延迟拆解、风险与实施记录见：
 
@@ -50,9 +50,24 @@ Use one keyboard and pointing device to control multiple Macs.
 - 停止控制时落点向屏幕内移动 `BORDER_SIZE + 2`，避免光标停在热区内导致无法武装。
 - 服务端新增越界钳制检测，不再单纯依赖 AppKit 的 `mouseEntered`。
 
+#### v1.4.3 修复：长时间运行 / 锁屏后的可靠性与手感
+
+- 控制请求增加 2 秒超时：连接僵死时自动断开并用新连接重试一次，不再卡在「连接中」导致后续切换全部失效。
+- 服务端只响应当前控制连接的断开事件，旧连接被系统回收时不再误杀正在使用的会话。
+- 服务端补上已接受连接的释放逻辑，修复每次重连都会滞留一个连接对象的问题。
+- 重复控制请求直接确认，不再重复创建热区窗口和事件源。
+- TCP 连接改为后台异步建立，对端睡眠或不可达时主线程不再阻塞；同时用 5 秒看门狗兜底。
+- keepalive 调为 60 秒空闲 + 10 秒 × 3 次探测，死连接可被发现且不易误断健康的空闲连接。
+- 控制期间每秒检查 event tap 状态，被系统禁用时自动恢复（安全输入和锁屏期间不强行恢复）。
+- 申请 `NSActivityUserInitiatedAllowingIdleSystemSleep`，避免 App Nap 降低事件转发线程的优先级。
+- 显示参数变化时同时刷新实际使用的 Direct 事件控制器，避免会话中途光标位置漂移。
+- 保持 1.4.2 的宽事件掩码：触控板手势等私有事件类型必须继续被捕获，否则手势会落在本机执行。
+- Settings 选项卡底部显示当前版本号。
+
 ### 兼容性提示
 
 - `PROTOCOL_VERSION = 21`：两台 Mac 必须同时升级到 v1.4.x，否则会提示协议版本不匹配（预期行为，避免新旧混用导致事件格式错乱）。
+- v1.4.3 未改动协议，可与 v1.4.2 互通。
 - 首次运行仍需在「系统设置 → 隐私与安全性 → 辅助功能」中授权。
 
 ---
