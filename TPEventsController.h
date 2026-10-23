@@ -65,6 +65,13 @@
 	   state below is owned by this queue. */
 	dispatch_queue_t _postingQueue;
 	NSLock * _screenCacheLock;
+	
+	/* Movement captured between crossing an edge and the server acknowledging
+	   the switch. Replayed once control starts so the transition has no dead
+	   time; dropped if the switch fails. */
+	NSMutableArray * _pendingSwitchEvents;
+	BOOL _bufferingPendingSwitch;
+	NSTimeInterval _pendingSwitchStartDate;
 }
 
 + (TPEventsController*)defaultController;
@@ -74,6 +81,12 @@
 - (void)stopGettingEvents;
 - (void)cleanupGettingEvents;
 @property (nonatomic, readonly, strong) id<TPEventsListener> eventsListener;
+
+/* Switch transition buffering. Only movement is kept (keys and buttons are
+   not replayed), and it is bounded in both time and count. */
+- (void)beginBufferingForPendingSwitch;
+- (void)commitBufferedSwitchEvents;
+- (void)cancelBufferedSwitchEvents;
 
 - (void)startPostingEvents;
 - (void)stopPostingEvents;
@@ -120,5 +133,8 @@
 - (BOOL)_coalesceMouseEvent:(CGEventRef)event;
 - (void)_flushPendingMouseEvent;
 - (void)_deliverEventToListener:(id)event;
+
+- (BOOL)_isBufferingForPendingSwitch;
+- (void)_bufferEventForPendingSwitch:(CGEventRef)event;
 
 @end

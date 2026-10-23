@@ -22,6 +22,11 @@
 
 extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 
+/* Keep the switch-transition buffer short: replaying more than ~80ms of stale
+   movement would show up as a jump instead of a seamless transition. */
+#define TP_PENDING_SWITCH_MAX_AGE 0.08
+#define TP_PENDING_SWITCH_MAX_EVENTS 48
+
 @implementation TPEventsController
 
 - (instancetype) init
@@ -240,6 +245,93 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 	_eventsListener = nil;
 }
 
+
+#pragma mark -
+#pragma mark Switch transition buffering
+
+- (void)beginBufferingForPendingSwitch
+{
+	@synchronized(self) {
+		if(_pendingSwitchEvents == nil)
+			_pendingSwitchEvents = [[NSMutableArray alloc] init];
+		else
+			[_pendingSwitchEvents removeAllObjects];
+		
+		_pendingSwitchStartDate = [NSDate timeIntervalSinceReferenceDate];
+		_bufferingPendingSwitch = YES;
+	}
+}
+
+- (void)commitBufferedSwitchEvents
+{
+	NSArray * events = nil;
+	
+	@synchronized(self) {
+		_bufferingPendingSwitch = NO;
+		events = _pendingSwitchEvents;
+		_pendingSwitchEvents = nil;
+	}
+	
+	/* Deliver in order, with the original event ages intact: the receiver
+	   restores each timestamp from them. */
+	for(id event in events) {
+		@autoreleasepool {
+			[self _deliverEventToListener:event];
+		}
+	}
+}
+
+- (void)cancelBufferedSwitchEvents
+{
+	@synchronized(self) {
+		_bufferingPendingSwitch = NO;
+		_pendingSwitchEvents = nil;
+	}
+}
+
+- (BOOL)_isBufferingForPendingSwitch
+{
+	@synchronized(self) {
+		return _bufferingPendingSwitch;
+	}
+}
+
+- (void)_bufferEventForPendingSwitch:(CGEventRef)event
+{
+	if(event == NULL)
+		return;
+	
+	/* Only movement is replayed. A click or key press that lands during the
+	   negotiation already applied locally and must not be duplicated. */
+	switch(CGEventGetType(event)) {
+		case kCGEventMouseMoved:
+		case kCGEventLeftMouseDragged:
+		case kCGEventRightMouseDragged:
+		case kCGEventOtherMouseDragged:
+			break;
+		default:
+			return;
+	}
+	
+	@synchronized(self) {
+		if(!_bufferingPendingSwitch)
+			return;
+		
+		if([NSDate timeIntervalSinceReferenceDate] - _pendingSwitchStartDate > TP_PENDING_SWITCH_MAX_AGE) {
+			[_pendingSwitchEvents removeAllObjects];
+			_bufferingPendingSwitch = NO;
+			return;
+		}
+		
+		if([_pendingSwitchEvents count] >= TP_PENDING_SWITCH_MAX_EVENTS)
+			return;
+		
+		CGEventRef copy = CGEventCreateCopy(event);
+		if(copy != NULL)
+			[_pendingSwitchEvents addObject:CFBridgingRelease(copy)];
+	}
+}
+
 - (void)dealloc
 {
 	if(_pendingMouseEvent != NULL) {
@@ -247,6 +339,12 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 		_pendingMouseEvent = NULL;
 	}
 	[_mouseFlushTimer invalidate];
+	
+	@synchronized(self) {
+		_bufferingPendingSwitch = NO;
+		[_pendingSwitchEvents removeAllObjects];
+		_pendingSwitchEvents = nil;
+	}
 }
 
 - (void)cleanupGettingEvents

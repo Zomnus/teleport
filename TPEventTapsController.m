@@ -102,6 +102,15 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 	BOOL capturing = ([self eventsListener] != nil) && controlling;
 	
 	if(!capturing) {
+		/* A switch is being negotiated: keep the movement so it can be replayed
+		   when the server acknowledges. The event itself still flows through so
+		   a failed switch leaves the local cursor where the user put it. */
+		if([self _isBufferingForPendingSwitch]) {
+			@autoreleasepool {
+				[self _bufferEventForPendingSwitch:event];
+			}
+		}
+		
 		/* Not capturing: let the event flow through untouched. The tap stays
 		   installed for the lifetime of the process instead of being
 		   disabled/re-enabled on every switch. */

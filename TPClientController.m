@@ -56,6 +56,8 @@ static TPClientController * _defaultClientController = nil;
 - (void)_scheduleControlRequestTimer;
 - (void)_cancelControlRequestTimer;
 - (void)_controlRequestDidTimeout:(NSTimer*)timer;
+- (void)_beginBufferingForPendingSwitchToHost:(TPRemoteHost*)remoteHost;
+- (void)_cancelBufferingForPendingSwitch;
 
 @end
 
@@ -318,9 +320,14 @@ static TPClientController * _defaultClientController = nil;
 	
 	if(!isRetry)
 		_controlRequestRetries = 0;
-	
+
 	_pendingControlHost = remoteHost;
 	_pendingControlLocation = location;
+	
+	/* Keep the movement that happens while the request is on the wire: it is
+	   otherwise dropped, which shows up as a short stall right after crossing
+	   the edge. */
+	[self _beginBufferingForPendingSwitchToHost:remoteHost];
 	
 	NSMutableDictionary * infoDict = [NSMutableDictionary dictionaryWithObjectsAndKeys:
 									  [NSValue valueWithPoint:location], TPMousePositionKey,
@@ -380,6 +387,20 @@ static TPClientController * _defaultClientController = nil;
 	_controlRequestTimer = nil;
 }
 
+- (void)_beginBufferingForPendingSwitchToHost:(TPRemoteHost*)remoteHost
+{
+	[_bufferingEventsController cancelBufferedSwitchEvents];
+	
+	_bufferingEventsController = [TPEventsController eventsControllerForRemoteHost:remoteHost];
+	[_bufferingEventsController beginBufferingForPendingSwitch];
+}
+
+- (void)_cancelBufferingForPendingSwitch
+{
+	[_bufferingEventsController cancelBufferedSwitchEvents];
+	_bufferingEventsController = nil;
+}
+
 - (void)_controlRequestDidTimeout:(NSTimer*)timer
 {
 	_controlRequestTimer = nil;
@@ -391,6 +412,8 @@ static TPClientController * _defaultClientController = nil;
 	NSPoint location = _pendingControlLocation;
 	
 	DebugLog(@"control request timed out (retries=%ld)", (long)_controlRequestRetries);
+	
+	[self _cancelBufferingForPendingSwitch];
 	
 	/* The connection is either stale (typical after sleep or a network roam)
 	   or the peer stopped answering. Drop it so the retry starts from a fresh
@@ -497,6 +520,14 @@ static TPClientController * _defaultClientController = nil;
 	/* Activate events recorder */
 	[self updateEventsController];
 	[[self eventsController] startGettingEventsForListener:self onScreen:[controlledHost localScreen]];
+	
+	/* Replay the movement captured while the switch was negotiated, before the
+	   live stream takes over. */
+	if(_bufferingEventsController == [self eventsController])
+		[_bufferingEventsController commitBufferedSwitchEvents];
+	else
+		[_bufferingEventsController cancelBufferedSwitchEvents];
+	_bufferingEventsController = nil;
 	
 	/* Start preventing the Mac to go to sleep */
 	[self _startSleepPrevention];
@@ -653,6 +684,7 @@ static TPClientController * _defaultClientController = nil;
 	_state = TPClientIdleState;
 	
 	[self _cancelControlRequestTimer];
+	[self _cancelBufferingForPendingSwitch];
 	_controlRequestRetries = 0;
 	_pendingControlHost = nil;
 	
@@ -784,6 +816,7 @@ void TPSleepCallback(void * refCon, io_service_t service, natural_t messageType,
 		   leaving the client stuck in the connecting state. */
 		[self setCurrentConnection:nil];
 		[self _cancelControlRequestTimer];
+		[self _cancelBufferingForPendingSwitch];
 		_controlRequestRetries = 0;
 		_pendingControlHost = nil;
 		_state = TPClientIdleState;
@@ -797,6 +830,7 @@ void TPSleepCallback(void * refCon, io_service_t service, natural_t messageType,
 		/* Reset before showing the modal alert so the request watchdog cannot
 		   fire while the sheet is up. */
 		[self _cancelControlRequestTimer];
+		[self _cancelBufferingForPendingSwitch];
 		_controlRequestRetries = 0;
 		_pendingControlHost = nil;
 		_state = TPClientIdleState;
@@ -829,6 +863,7 @@ void TPSleepCallback(void * refCon, io_service_t service, natural_t messageType,
 			   connecting state: every further switch would be ignored. Reset
 			   before the alert so the watchdog cannot fire while it is up. */
 			[self _cancelControlRequestTimer];
+			[self _cancelBufferingForPendingSwitch];
 			_controlRequestRetries = 0;
 			_pendingControlHost = nil;
 			_state = TPClientIdleState;

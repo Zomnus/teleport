@@ -37,6 +37,9 @@ typedef NS_ENUM(NSInteger, TPClientState) {
 	NSInteger _controlRequestRetries;
 	TPRemoteHost * _pendingControlHost;
 	NSPoint _pendingControlLocation;
+	
+	/* Controller whose tap buffers movement while the switch is negotiated. */
+	TPEventsController * _bufferingEventsController;
 }
 
 + (TPClientController*)defaultController;
