@@ -25,6 +25,11 @@
 	BOOL _tapOnMainRunLoop;
 	NSInteger _sessionGeneration;
 	NSTimer * _tapHealthTimer;
+	
+	/* How many times we hid the local cursor: some apps and full-screen spaces
+	   show it again while we are controlling, so the count has to be balanced
+	   when control ends. */
+	NSInteger _cursorHidesIssued;
 }
 
 @end

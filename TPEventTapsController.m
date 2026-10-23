@@ -54,35 +54,34 @@ static const char * eventTypeName[] =
 
 @implementation TPEventTapsController
 
-static void setCursorVisibilityWithAttempts(BOOL visible, int attempt)
-{
-	CGError error;
-	if (visible) {
-		error = CGDisplayShowCursor(kCGDirectMainDisplay);
-	} else {
-		error = CGDisplayHideCursor(kCGDirectMainDisplay);
-	}
-	DebugLog(@"setCursorVisibility: %@ -> %@", @(visible), @(error));
-	
-	/* Bounded retry: while the session is locked the call may keep failing,
-	   and the old unconditional recursion left a 1 Hz retry chain forever. */
-	if (error != kCGErrorSuccess && attempt < 10) {
-		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)),
-					   dispatch_get_main_queue(), ^{
-			setCursorVisibilityWithAttempts(visible, attempt + 1);
-		});
-	}
-}
-
-static void setCursorVisibility(BOOL visible) {
-	setCursorVisibilityWithAttempts(visible, 0);
-}
-
 + (TPEventsController*)defaultController
 {
 	if(_eventTapsController == nil)
 		_eventTapsController = [[TPEventTapsController alloc] init];
 	return _eventTapsController;
+}
+
+- (void)_hideCursorIfNeeded
+{
+	/* The local cursor must stay invisible while the remote one is in charge.
+	   Some full-screen apps and space changes show it again, so this is polled
+	   while capturing instead of being a one-shot call. */
+	if(!CGCursorIsVisible())
+		return;
+	
+	CGError error = CGDisplayHideCursor(kCGDirectMainDisplay);
+	if(error == kCGErrorSuccess)
+		_cursorHidesIssued++;
+	
+	DebugLog(@"hide cursor -> %@ (issued=%ld)", @(error), (long)_cursorHidesIssued);
+}
+
+- (void)_restoreCursor
+{
+	while(_cursorHidesIssued > 0) {
+		CGDisplayShowCursor(kCGDirectMainDisplay);
+		_cursorHidesIssued--;
+	}
 }
 
 static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *refcon)
@@ -155,7 +154,7 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 	CGSSetConnectionProperty(_CGSDefaultConnection(), _CGSDefaultConnection(), propertyString, kCFBooleanTrue);
 	CFRelease(propertyString);
 	
-	setCursorVisibility(NO);
+	[self _hideCursorIfNeeded];
 	[self invalidateScreenCache];
 	
 	/* A new capture session starts here. Stale stop requests from a previous
@@ -355,6 +354,10 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 
 - (void)_tapHealthTimerFired:(NSTimer*)timer
 {
+	/* Full-screen apps and space changes can bring the local cursor back while
+	   we are controlling; keep it hidden. Cheap enough to run at 1 Hz. */
+	[self _hideCursorIfNeeded];
+	
 	if(_eventPort == NULL || CGEventTapIsEnabled(_eventPort))
 		return;
 	
@@ -389,8 +392,8 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 - (void)cleanupGettingEvents
 {
 	[super cleanupGettingEvents];
-		
-	setCursorVisibility(YES);
+	
+	[self _restoreCursor];
 }
 
 #pragma mark -
