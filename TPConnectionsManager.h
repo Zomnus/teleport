@@ -29,6 +29,11 @@
 
 - (BOOL)wakeUpHost:(TPRemoteHost*)host;
 
+/* Accepted connections hand their delegate to TPServerController, so the
+   manager never sees their disconnect callback. The controller must report it
+   here, otherwise every reconnection is retained forever. */
+- (void)connectionDidClose:(TPNetworkConnection*)connection;
+
 @end
 
 @interface NSObject (TPConnectionsManager_delegate)

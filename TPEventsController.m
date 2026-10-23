@@ -8,6 +8,8 @@
 
 #import "TPEventsController.h"
 
+#import <CoreGraphics/CoreGraphics.h>
+
 #import "TPDirectEventTapsController.h"
 #import "TPEventTapsController.h"
 #import "TPPreferencesManager.h"
@@ -254,6 +256,9 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 - (void)startPostingEvents
 {
 	_lastPostedEventDate = 0.0;
+	/* startControl already woke the display; do not wake it again on the very
+	   first forwarded event. */
+	_lastReceivedEventDate = [NSDate timeIntervalSinceReferenceDate];
 	_mouseLocationValid = NO;
 	[self invalidateScreenCache];
 }
@@ -273,12 +278,17 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 - (void)postEventWithEventData:(NSData*)eventData
 {
 	NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-		
-	if (now - _lastPostedEventDate > 60.0) { // if last event occurred more than a minute ago
-		[[TPLocalHost localHost] wakeUpScreen];
+	
+	/* Wake the display only when it is really asleep, and do it after posting
+	   this event: IOPM calls on the main thread were visible as a hitch on the
+	   first movement of every session. */
+	if (now - _lastReceivedEventDate > 60.0 && CGDisplayIsAsleep(CGMainDisplayID())) {
+		dispatch_async(dispatch_get_main_queue(), ^{
+			[[TPLocalHost localHost] wakeUpScreen];
+		});
 	}
 	
-	_lastPostedEventDate = now;
+	_lastReceivedEventDate = now;
 	
 #if THREADED_EVENT_POSTING
 	[NSThread detachNewThreadSelector:@selector(_threadedPostEventWithEventData:) toTarget:self withObject:eventData];
@@ -404,6 +414,12 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 - (void)invalidateScreenCache
 {
 	_screenCacheValid = NO;
+}
+
++ (void)invalidateScreenCaches
+{
+	[[TPEventTapsController defaultController] invalidateScreenCache];
+	[[TPDirectEventTapsController defaultController] invalidateScreenCache];
 }
 
 - (uint64_t)_eventAgeForEvent:(id)event

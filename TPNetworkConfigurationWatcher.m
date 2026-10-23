@@ -71,13 +71,14 @@ static void _networkChangeCallBack(SCDynamicStoreRef store, CFArrayRef changedKe
             NSLog(@"Error creating the dynamic store runloop source");
         }
 		else {
-            CFRunLoopAddSource(CFRunLoopGetCurrent(), _sourceRef, kCFRunLoopDefaultMode);
+			/* Keep the source reference: the run loop retains it as well, but
+			   releasing it here left _sourceRef dangling and stopWatching would
+			   have released it a second time. */
+            CFRunLoopAddSource(CFRunLoopGetCurrent(), _sourceRef, kCFRunLoopCommonModes);
             
             if(!SCDynamicStoreSetNotificationKeys(_storeRef, (CFArrayRef)keys, (CFArrayRef)patterns)) {
                 NSLog(@"Error setting the dynamic store notification keys");
             }
-			
-            CFRelease(_sourceRef);
 		}
 		
 		CFRelease(keys);
@@ -88,7 +89,7 @@ static void _networkChangeCallBack(SCDynamicStoreRef store, CFArrayRef changedKe
 - (void)stopWatching
 {
 	if (_sourceRef) {
-		CFRunLoopRemoveSource(CFRunLoopGetCurrent(), _sourceRef, kCFRunLoopDefaultMode);
+		CFRunLoopRemoveSource(CFRunLoopGetCurrent(), _sourceRef, kCFRunLoopCommonModes);
 		CFRelease(_sourceRef);
 		_sourceRef = NULL;
 	}

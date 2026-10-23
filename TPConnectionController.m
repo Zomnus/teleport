@@ -20,6 +20,7 @@
 #import "TPMessage.h"
 
 #import "TPHostsManager.h"
+#import "TPConnectionsManager.h"
 #import "TPTransfersManager.h"
 #import "TPTransfer.h"
 #import "TPPasteboardTransfer.h"
@@ -293,6 +294,20 @@ static NSSound * _switchSound = nil;
 
 - (void)connectionDisconnected:(TPNetworkConnection*)connection
 {
+	/* Accepted connections delegate to this controller instead of the
+	   manager, so release them from the manager's set here; otherwise every
+	   reconnection stays alive for the lifetime of the process. */
+	[[TPConnectionsManager manager] connectionDidClose:connection];
+	
+	/* Connections from earlier sessions can be torn down long after they
+	   stopped being used (for instance a socket that went stale while a Mac
+	   was asleep). Never let such a stale connection terminate the session
+	   that is currently in use. */
+	if(connection != nil && connection != _currentConnection) {
+		DebugLog(@"ignoring disconnect of stale connection %@", connection);
+		return;
+	}
+	
 	DebugLog(@"connection broken - disconnecting");
 	[self stopControl];
 }

@@ -48,6 +48,48 @@
 	return prefPane;
 }
 
+static NSTabView * TPFindTabView(NSView *view)
+{
+	if([view isKindOfClass:[NSTabView class]])
+		return (NSTabView*)view;
+	
+	for(NSView * subview in [view subviews]) {
+		NSTabView * tabView = TPFindTabView(subview);
+		if(tabView != nil)
+			return tabView;
+	}
+	
+	return nil;
+}
+
+- (void)_installVersionLabelInSettingsTab
+{
+	NSString * version = [[[NSBundle bundleForClass:[self class]] infoDictionary] objectForKey:@"CFBundleVersion"];
+	if(version == nil)
+		return;
+	
+	NSTabView * tabView = TPFindTabView([[self window] contentView]);
+	if(tabView == nil || [tabView numberOfTabViewItems] < 2)
+		return;
+	
+	/* The Settings tab is the second one in every localization; adding the
+	   label here avoids having to patch every translated xib. */
+	NSView * settingsView = [[tabView tabViewItemAtIndex:1] view];
+	if(settingsView == nil)
+		return;
+	
+	NSTextField * versionLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(110.0, 4.0, 320.0, 16.0)];
+	[versionLabel setEditable:NO];
+	[versionLabel setSelectable:YES];
+	[versionLabel setBordered:NO];
+	[versionLabel setDrawsBackground:NO];
+	[versionLabel setFont:[NSFont systemFontOfSize:11.0]];
+	[versionLabel setTextColor:[NSColor secondaryLabelColor]];
+	[versionLabel setStringValue:[NSString stringWithFormat:NSLocalizedString(@"Version %@", nil), version]];
+	[versionLabel setAutoresizingMask:NSViewMaxYMargin];
+	[settingsView addSubview:versionLabel];
+}
+
 - (void)windowDidLoad
 {
 #if ! LEGACY_BUILD
@@ -82,6 +124,8 @@
 	[chooseCertificateButton setHidden:!hasSeveralPotentialIdentities];
 
 	[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(needUpdateLayout) name:TPHostsConfigurationDidChangeNotification object:nil];
+	
+	[self _installVersionLabelInSettingsTab];
 }
 
 - (void)showWindow:(id)sender

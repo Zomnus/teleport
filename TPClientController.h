@@ -29,6 +29,14 @@ typedef NS_ENUM(NSInteger, TPClientState) {
 	io_object_t _sleepNotifier;
 	io_connect_t _sleepService;
 	IONotificationPortRef _sleepNotifyPortRef;
+	
+	/* Control request watchdog: a stale TCP connection (e.g. after the Mac
+	   slept) can swallow the request without any error, leaving the client
+	   stuck in the connecting state forever. */
+	NSTimer * _controlRequestTimer;
+	NSInteger _controlRequestRetries;
+	TPRemoteHost * _pendingControlHost;
+	NSPoint _pendingControlLocation;
 }
 
 + (TPClientController*)defaultController;
@@ -36,7 +44,7 @@ typedef NS_ENUM(NSInteger, TPClientState) {
 - (void)updateTriggersAndShowVisualHint:(BOOL)showVisualHint;
 
 - (BOOL)requestStartControlOnHost:(TPRemoteHost*)remoteHost atLocation:(NSPoint)location withDraggingInfo:(id <NSDraggingInfo>)draggingInfo;
-- (void)sendStartControlRequestForConnection:(TPNetworkConnection*)connection withInfoDict:(NSDictionary*)infoDict;
+- (BOOL)sendStartControlRequestForConnection:(TPNetworkConnection*)connection withInfoDict:(NSDictionary*)infoDict;
 - (void)startControl;
 
 - (void)requestedStopControlWithInfoDict:(NSDictionary*)infoDict;

@@ -47,7 +47,7 @@ static TPServerController * _defaultServerController = nil;
 	
 	[self bind:@"allowControl" toPref:ALLOW_CONTROL];
 	
-	[[[NSWorkspace sharedWorkspace] notificationCenter] addObserver:self selector:@selector(connectionDisconnected:) name:NSWorkspaceSessionDidResignActiveNotification object:nil];
+	[[[NSWorkspace sharedWorkspace] notificationCenter] addObserver:self selector:@selector(sessionDidResignActive:) name:NSWorkspaceSessionDidResignActiveNotification object:nil];
 	
 	return self;
 }
@@ -187,6 +187,15 @@ static TPServerController * _defaultServerController = nil;
 		return;
 	}
 	
+	/* Duplicated or retried request while already controlling this connection:
+	   acknowledge it instead of rebuilding the whole session (which would leak
+	   the previous hot border and event source). */
+	if(connectionIsCurrent && _state == TPServerControlledState) {
+		[connection sendMessage:[TPMessage messageWithType:TPControlSuccessMsgType]];
+		DebugLog(@"Ignoring duplicate control request");
+		return;
+	}
+	
 	/* Accept control */
 	[connection sendMessage:[TPMessage messageWithType:TPControlSuccessMsgType]];
 
@@ -222,6 +231,13 @@ static TPServerController * _defaultServerController = nil;
 	screenPlacement.origin.x += NSMinX(sharedScreenFrame);
 	screenPlacement.origin.y += NSMinY(sharedScreenFrame);
 	
+	/* Defensive: never leave a previous return border alive. */
+	if(_clientHotBorder != nil) {
+		[self takeDownHotBorder:_clientHotBorder];
+		[_clientHotBorder close];
+		_clientHotBorder = nil;
+	}
+	
 	_clientHotBorder = [[TPHotBorder alloc] initWithRepresentingRect:screenPlacement inRect:sharedScreenFrame];
 	[self setupHotBorder:_clientHotBorder forHost:host];
 	[_clientHotBorder setDelegate:self];
@@ -256,15 +272,9 @@ static TPServerController * _defaultServerController = nil;
 	if([[TPLocalHost localHost] hasCustomBackgroundImage])
 		[[TPTransfersManager manager] beginTransfer:[TPOutgoingBackgroundImageTransfer transfer] usingConnection:[self currentConnection]];
 	
-	/* Wake up display */
+	/* Wake up display. wakeUpScreen already performs the IODisplayWrangler
+	   tweak; doing it twice made the first mouse events wait on IOPM calls. */
 	[[TPLocalHost localHost] wakeUpScreen];
-	
-	io_registry_entry_t entry = IORegistryEntryFromPath(kIOMasterPortDefault,
-														"IOService:/IOResources/IODisplayWrangler");
-	if (entry != MACH_PORT_NULL) {
-		IORegistryEntrySetCFProperty(entry, CFSTR("IORequestIdle"), kCFBooleanFalse);
-		IOObjectRelease(entry);
-	}
 	
 //	[eventsPlayer releaseAllKeys];
 	
@@ -326,6 +336,11 @@ static TPServerController * _defaultServerController = nil;
 - (void)connectionFromClientAccepted:(TPNetworkConnection*)connection
 {
 	[connection setDelegate:self];
+}
+
+- (void)sessionDidResignActive:(NSNotification*)notification
+{
+	[self stopControl];
 }
 
 - (void)connection:(TPNetworkConnection*)connection receivedMessage:(TPMessage*)message

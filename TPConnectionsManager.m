@@ -19,6 +19,11 @@
 static NSString * TPMsgProtocolVersionKey = @"proto-version";
 static NSString * TPMsgHostDataKey = @"host-data";
 
+/* Upper bound for TCP connect + TLS handshake + identification. The socket
+   connect itself is asynchronous, so without this a peer that never answers
+   would leave the client waiting indefinitely. */
+#define CONNECT_WATCHDOG_TIMEOUT 5.0
+
 static TPConnectionsManager * _connectionsManager = nil;
 
 @class _TPSocketConnection;
@@ -40,9 +45,13 @@ static TPConnectionsManager * _connectionsManager = nil;
 	NSDictionary * _infoDict;
 	TPNetworkConnection * _connection;
 	id _delegate;
+	NSTimer * _connectTimer;
 }
 
 - (instancetype) initWithConnectionToHost:(TPRemoteHost*)remoteHost delegate:(id)delegate infoDict:(NSDictionary*)infoDict NS_DESIGNATED_INITIALIZER;
+
+- (void)_cancelConnectTimer;
+- (void)_connectTimedOut:(NSTimer*)timer;
 
 @property (nonatomic, readonly, strong) TPRemoteHost *host;
 @property (nonatomic, readonly, copy) NSDictionary *infoDict;
@@ -67,10 +76,40 @@ static TPConnectionsManager * _connectionsManager = nil;
 	[_socket setEnableEncryption:enableEncryption];
 	if([_socket connectToHost:[remoteHost address] onPort:[remoteHost port]]) {
 		[_socket setNoDelay:YES];
+		
+		/* The socket connects in the background; bound the whole attempt so a
+		   sleeping or unreachable peer cannot keep us in "connecting". */
+		_connectTimer = [NSTimer timerWithTimeInterval:CONNECT_WATCHDOG_TIMEOUT
+												target:self
+											  selector:@selector(_connectTimedOut:)
+											  userInfo:nil
+											   repeats:NO];
+		[[NSRunLoop mainRunLoop] addTimer:_connectTimer forMode:NSRunLoopCommonModes];
+		
 		return self;
 	}
 	[_socket close];
 	return nil;
+}
+
+- (void)dealloc
+{
+	[self _cancelConnectTimer];
+}
+
+- (void)_cancelConnectTimer
+{
+	[_connectTimer invalidate];
+	_connectTimer = nil;
+}
+
+- (void)_connectTimedOut:(NSTimer*)timer
+{
+	_connectTimer = nil;
+	
+	DebugLog(@"connection attempt timed out");
+	[_socket close];
+	[[TPConnectionsManager manager] _socketConnectionFailed:self];
 }
 
 
@@ -97,6 +136,7 @@ static TPConnectionsManager * _connectionsManager = nil;
 - (void)tcpSocketConnectionSucceeded:(TPTCPSocket*)tcpSocket
 {
 	PRINT_ME;
+	[self _cancelConnectTimer];
 	_connection = [[TPNetworkConnection alloc] initWithSocket:tcpSocket];
 	
 	[_connection setDelegate:self];
@@ -115,12 +155,14 @@ static TPConnectionsManager * _connectionsManager = nil;
 - (void)tcpSocketConnectionFailed:(TPTCPSocket*)tcpSocket
 {
 	PRINT_ME;
+	[self _cancelConnectTimer];
 	[[TPConnectionsManager manager] _socketConnectionFailed:self];
 }
 
 - (void)tcpSocketSecureConnectionFailed:(TPTCPSecureSocket*)tcpSocket
 {
 	PRINT_ME;
+	[self _cancelConnectTimer];
 	[[TPConnectionsManager manager] _socketConnectionFailed:self];
 }
 
@@ -232,7 +274,7 @@ static TPConnectionsManager * _connectionsManager = nil;
 	id delegate = [socketConnection delegate];
 	TPRemoteHost * host = [socketConnection host];
 	
-	if([_pendingConnections valueForKey:[host identifier]]) {
+	if([_pendingConnections objectForKey:[host identifier]] == socketConnection) {
 		if(delegate && [delegate respondsToSelector:@selector(connectionToServerFailed:infoDict:)])
 			[delegate connectionToServerFailed:host infoDict:[socketConnection infoDict]];
 		[_pendingConnections removeObjectForKey:[host identifier]];
@@ -244,7 +286,7 @@ static TPConnectionsManager * _connectionsManager = nil;
 	id delegate = [socketConnection delegate];
 	TPRemoteHost * host = [socketConnection host];
 	
-	if([_pendingConnections valueForKey:[host identifier]]) {
+	if([_pendingConnections objectForKey:[host identifier]] == socketConnection) {
 		if(delegate && [delegate respondsToSelector:@selector(connectionToServerSucceeded:infoDict:)])
 			[delegate connectionToServerSucceeded:networkConnection infoDict:[socketConnection infoDict]];
 		
@@ -335,6 +377,11 @@ static TPConnectionsManager * _connectionsManager = nil;
 	else {
 		NSLog(@"received invalid msg type: %ld (excepted identification - %ld)", [message msgType], (long)TPIdentificationMsgType);
 	}
+}
+
+- (void)connectionDidClose:(TPNetworkConnection*)connection
+{
+	[_connections removeObject:connection];
 }
 
 - (void)connectionDisconnected:(TPNetworkConnection *)connection

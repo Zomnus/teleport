@@ -40,6 +40,11 @@
 
 #define HOTBORDER_SAFE_MARGIN 3
 
+/* How long to wait for the server to acknowledge a control request before
+   assuming the connection is stale and retrying on a fresh socket. */
+#define CONTROL_REQUEST_TIMEOUT 2.0
+#define CONTROL_REQUEST_MAX_RETRIES 1
+
 static TPClientController * _defaultClientController = nil;
 
 @interface TPClientController (Internal)
@@ -47,6 +52,10 @@ static TPClientController * _defaultClientController = nil;
 - (void)_startSleepPrevention;
 - (void)_stopSleepPrevention;
 - (NSDictionary*)_clientOptionsForRemoteHost:(TPRemoteHost*)remoteHost;
+- (BOOL)_requestStartControlOnHost:(TPRemoteHost*)remoteHost atLocation:(NSPoint)location withDraggingInfo:(id<NSDraggingInfo>)draggingInfo isRetry:(BOOL)isRetry;
+- (void)_scheduleControlRequestTimer;
+- (void)_cancelControlRequestTimer;
+- (void)_controlRequestDidTimeout:(NSTimer*)timer;
 
 @end
 
@@ -297,10 +306,21 @@ static TPClientController * _defaultClientController = nil;
 
 - (BOOL)requestStartControlOnHost:(TPRemoteHost*)remoteHost atLocation:(NSPoint)location withDraggingInfo:(id <NSDraggingInfo>)draggingInfo
 {
-	DebugLog(@"request start control on %@, _state=%ld", remoteHost, _state);
+	return [self _requestStartControlOnHost:remoteHost atLocation:location withDraggingInfo:draggingInfo isRetry:NO];
+}
+
+- (BOOL)_requestStartControlOnHost:(TPRemoteHost*)remoteHost atLocation:(NSPoint)location withDraggingInfo:(id <NSDraggingInfo>)draggingInfo isRetry:(BOOL)isRetry
+{
+	DebugLog(@"request start control on %@, _state=%ld", remoteHost, (long)_state);
 	
 	if(remoteHost == nil || [remoteHost hostState] != TPHostPeeredOnlineState || _state != TPClientIdleState)
 		return NO;
+	
+	if(!isRetry)
+		_controlRequestRetries = 0;
+	
+	_pendingControlHost = remoteHost;
+	_pendingControlLocation = location;
 	
 	NSMutableDictionary * infoDict = [NSMutableDictionary dictionaryWithObjectsAndKeys:
 									  [NSValue valueWithPoint:location], TPMousePositionKey,
@@ -314,29 +334,86 @@ static TPClientController * _defaultClientController = nil;
 	}
 	
 	/* Re-use existing connection if possible */
-	BOOL shouldConnect = YES;
+	BOOL started = NO;
 	TPNetworkConnection * currentConnection = [self currentConnection];
 	if(currentConnection != nil) {
-		if([currentConnection isValidForHost:remoteHost]) {
-			[self sendStartControlRequestForConnection:currentConnection withInfoDict:infoDict];
-			shouldConnect = NO;
-			return YES;
+		if([currentConnection isValidForHost:remoteHost] &&
+		   [self sendStartControlRequestForConnection:currentConnection withInfoDict:infoDict]) {
+			started = YES;
 		}
 		else {
+			/* The cached connection is no longer usable (stale socket,
+			   disconnect in flight): start over with a fresh one. */
 			[self setCurrentConnection:nil];
 		}
 	}
 	
-	if(shouldConnect) {
-		if([[TPConnectionsManager manager] connectToHost:remoteHost withDelegate:self infoDict:infoDict]) {
-			_state = TPClientConnectingState;
-			return YES;
-		}
-	}
-	return NO;
+	if(!started && [[TPConnectionsManager manager] connectToHost:remoteHost withDelegate:self infoDict:infoDict])
+		started = YES;
+	
+	if(!started)
+		return NO;
+	
+	/* Stay in the connecting state until the server answers. Otherwise every
+	   extra edge hit while the network is slow sends another control request,
+	   and the server rebuilds (and previously leaked) its return border. */
+	_state = TPClientConnectingState;
+	
+	return YES;
 }
 
-- (void)sendStartControlRequestForConnection:(TPNetworkConnection*)connection withInfoDict:(NSDictionary*)infoDict
+- (void)_scheduleControlRequestTimer
+{
+	[self _cancelControlRequestTimer];
+	
+	_controlRequestTimer = [NSTimer timerWithTimeInterval:CONTROL_REQUEST_TIMEOUT
+												   target:self
+												 selector:@selector(_controlRequestDidTimeout:)
+												 userInfo:nil
+												  repeats:NO];
+	[[NSRunLoop mainRunLoop] addTimer:_controlRequestTimer forMode:NSRunLoopCommonModes];
+}
+
+- (void)_cancelControlRequestTimer
+{
+	[_controlRequestTimer invalidate];
+	_controlRequestTimer = nil;
+}
+
+- (void)_controlRequestDidTimeout:(NSTimer*)timer
+{
+	_controlRequestTimer = nil;
+	
+	if(_state != TPClientConnectingState)
+		return;
+	
+	TPRemoteHost * host = _pendingControlHost;
+	NSPoint location = _pendingControlLocation;
+	
+	DebugLog(@"control request timed out (retries=%ld)", (long)_controlRequestRetries);
+	
+	/* The connection is either stale (typical after sleep or a network roam)
+	   or the peer stopped answering. Drop it so the retry starts from a fresh
+	   socket instead of waiting for the kernel to give up. */
+	[self setCurrentConnection:nil];
+	_state = TPClientIdleState;
+	
+	if(_controlRequestRetries < CONTROL_REQUEST_MAX_RETRIES && host != nil) {
+		_controlRequestRetries++;
+		if(![self _requestStartControlOnHost:host atLocation:location withDraggingInfo:nil isRetry:YES]) {
+			_controlRequestRetries = 0;
+			_pendingControlHost = nil;
+			[self updateTriggersAndShowVisualHint:NO];
+		}
+	}
+	else {
+		_controlRequestRetries = 0;
+		_pendingControlHost = nil;
+		[self updateTriggersAndShowVisualHint:NO];
+	}
+}
+
+- (BOOL)sendStartControlRequestForConnection:(TPNetworkConnection*)connection withInfoDict:(NSDictionary*)infoDict
 {
 	TPRemoteHost * controlledHost = [connection connectedHost];
 	
@@ -369,7 +446,14 @@ static TPClientController * _defaultClientController = nil;
 													  TPMousePositionKey: [NSData dataWithPoint:mousePosition],
 													  TPSwitchOptionsKey: clientOptions}];
 	
-	[[self currentConnection] sendMessage:message];
+	if(![[self currentConnection] sendMessage:message])
+		return NO;
+	
+	/* The request is on the wire: wait for the acknowledgement. A stale TCP
+	   connection can swallow it silently, so never wait indefinitely. */
+	[self _scheduleControlRequestTimer];
+	
+	return YES;
 }
 
 - (void)startControl
@@ -377,6 +461,13 @@ static TPClientController * _defaultClientController = nil;
 #if DEBUG_GENERAL
 	DebugLog(@"client: startControl");
 #endif
+	
+	/* A duplicated acknowledgement (e.g. from a retried request) must not
+	   rebuild the session or replay the switch sound. */
+	if(_state == TPClientControllingState) {
+		[self _cancelControlRequestTimer];
+		return;
+	}
 	
 	TPRemoteHost * controlledHost = [[self currentConnection] connectedHost];
 	
@@ -409,6 +500,10 @@ static TPClientController * _defaultClientController = nil;
 	
 	/* Start preventing the Mac to go to sleep */
 	[self _startSleepPrevention];
+	
+	[self _cancelControlRequestTimer];
+	_controlRequestRetries = 0;
+	_pendingControlHost = nil;
 	
 	_state = TPClientControllingState;
 }
@@ -557,6 +652,10 @@ static TPClientController * _defaultClientController = nil;
 	
 	_state = TPClientIdleState;
 	
+	[self _cancelControlRequestTimer];
+	_controlRequestRetries = 0;
+	_pendingControlHost = nil;
+	
 	/* Update hot borders */
 	[self updateTriggersAndShowVisualHint:NO];
 	
@@ -673,19 +772,39 @@ void TPSleepCallback(void * refCon, io_service_t service, natural_t messageType,
 
 - (void)connectionToServerSucceeded:(TPNetworkConnection*)connection infoDict:(NSDictionary*)infoDict
 {
-	[self sendStartControlRequestForConnection:connection withInfoDict:infoDict];
+	if(_state != TPClientConnectingState) {
+		/* Late success from an attempt that already timed out and was
+		   abandoned; do not start a second control session. */
+		[connection disconnect];
+		return;
+	}
+	
+	if(![self sendStartControlRequestForConnection:connection withInfoDict:infoDict]) {
+		/* The connection cannot carry the request: fail the attempt instead of
+		   leaving the client stuck in the connecting state. */
+		[self setCurrentConnection:nil];
+		[self _cancelControlRequestTimer];
+		_controlRequestRetries = 0;
+		_pendingControlHost = nil;
+		_state = TPClientIdleState;
+		[self updateTriggersAndShowVisualHint:NO];
+	}
 }
 
 - (void)connectionToServerFailed:(TPRemoteHost*)host infoDict:(NSDictionary*)infoDict
 {
 	if (_state == TPClientConnectingState) {
+		/* Reset before showing the modal alert so the request watchdog cannot
+		   fire while the sheet is up. */
+		[self _cancelControlRequestTimer];
+		_controlRequestRetries = 0;
+		_pendingControlHost = nil;
+		_state = TPClientIdleState;
+		[self updateTriggersAndShowVisualHint:NO];
+		
 		NSString * msgTitle = [NSString stringWithFormat:NSLocalizedString(@"Connection to \\U201C%@\\U201D failed.", @"Title for connection failure"), [host computerName]];
 		NSAlert * alert = [NSAlert alertWithMessageText:msgTitle defaultButton:NSLocalizedString(@"OK", nil) alternateButton:nil otherButton:nil informativeTextWithFormat:NSLocalizedString(@"The server may be down, or an encryption problem may have occured. If encryption is enabled, please check that the certificate algorithms match.", nil)];
 		[(TPMainController*)[NSApp delegate] presentAlert:alert];
-		
-		[self updateTriggersAndShowVisualHint:NO];
-		
-		_state = TPClientIdleState;
 	}
 }
 
@@ -705,6 +824,15 @@ void TPSleepCallback(void * refCon, io_service_t service, natural_t messageType,
 			TPRemoteHost * controlledHost = [[self currentConnection] connectedHost];
 			
 			[controlledHost setHostState:TPHostSharedState];
+			
+			/* A rejected request must not leave the client stuck in the
+			   connecting state: every further switch would be ignored. Reset
+			   before the alert so the watchdog cannot fire while it is up. */
+			[self _cancelControlRequestTimer];
+			_controlRequestRetries = 0;
+			_pendingControlHost = nil;
+			_state = TPClientIdleState;
+			[self updateTriggersAndShowVisualHint:NO];
 			
 			NSString * msgTitle = [NSString stringWithFormat:NSLocalizedString(@"Host \\U201C%@\\U201D rejected control.", @"Title for control failure"), [controlledHost computerName]];
 			NSAlert * alert = [NSAlert alertWithMessageText:msgTitle defaultButton:NSLocalizedString(@"Yes", nil) alternateButton:NSLocalizedString(@"No", nil) otherButton:nil informativeTextWithFormat:NSLocalizedString(@"The host has probably removed this Mac from its trusted hosts list. Do you want to ask for trust again?", nil)];

@@ -12,6 +12,7 @@
 #import "TPPreferencesManager.h"
 #import "TPMainController.h"
 #import "TPClientController.h"
+#import "TPScreenLockWatcher.h"
 
 #include <Carbon/Carbon.h>
 
@@ -47,23 +48,28 @@ static const char * eventTypeName[] =
 
 @implementation TPEventTapsController
 
-static void setCursorVisibility(BOOL visible) {
-	static CGError error;
+static void setCursorVisibilityWithAttempts(BOOL visible, int attempt)
+{
+	CGError error;
 	if (visible) {
 		error = CGDisplayShowCursor(kCGDirectMainDisplay);
 	} else {
 		error = CGDisplayHideCursor(kCGDirectMainDisplay);
 	}
 	DebugLog(@"setCursorVisibility: %@ -> %@", @(visible), @(error));
-
-	if (error != kCGErrorSuccess) {
+	
+	/* Bounded retry: while the session is locked the call may keep failing,
+	   and the old unconditional recursion left a 1 Hz retry chain forever. */
+	if (error != kCGErrorSuccess && attempt < 10) {
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)),
 					   dispatch_get_main_queue(), ^{
-			if (error != kCGErrorSuccess) {
-				setCursorVisibility(visible);
-			}
+			setCursorVisibilityWithAttempts(visible, attempt + 1);
 		});
 	}
+}
+
+static void setCursorVisibility(BOOL visible) {
+	setCursorVisibilityWithAttempts(visible, 0);
 }
 
 + (TPEventsController*)defaultController
@@ -143,6 +149,11 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 		_sessionGeneration++;
 	}
 	
+	/* The system can silently disable a tap (timeouts, secure input, lock
+	   screen) without delivering anything we can act on. Poll its state while
+	   capturing so forwarding recovers on its own. */
+	[self _startTapHealthTimer];
+	
 	if(_eventPort != NULL) {
 		if(_eventThread == nil && !_tapOnMainRunLoop) {
 			/* The capturing thread died unexpectedly: rebuild from scratch. */
@@ -216,6 +227,11 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 	CFMachPortRef port = CGEventTapCreate(kCGSessionEventTap,
 										  kCGHeadInsertEventTap,
 										  0,
+										  /* Keep this mask broad. Trackpad gestures and
+											 several other input events use types outside the
+											 public CGEventType list; narrowing the mask made
+											 gestures execute on the local Mac while it was
+											 controlling another one. */
 										  kCGEventMaskForAllEvents & ~(NX_KITDEFINEDMASK |
 																	   NX_APPDEFINEDMASK),
 										  eventCallback,
@@ -243,6 +259,8 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 
 - (void)_teardownEventTap
 {
+	[self _stopTapHealthTimer];
+	
 	if(_eventSourceRef != NULL) {
 		if(_eventRunLoop != NULL) {
 			CFRunLoopRemoveSource(_eventRunLoop, _eventSourceRef, kCFRunLoopDefaultMode);
@@ -301,8 +319,45 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 	}
 }
 
+- (void)_startTapHealthTimer
+{
+	if(_tapHealthTimer != nil)
+		return;
+	
+	_tapHealthTimer = [NSTimer timerWithTimeInterval:1.0
+											  target:self
+											selector:@selector(_tapHealthTimerFired:)
+											userInfo:nil
+											 repeats:YES];
+	[[NSRunLoop mainRunLoop] addTimer:_tapHealthTimer forMode:NSRunLoopCommonModes];
+}
+
+- (void)_stopTapHealthTimer
+{
+	[_tapHealthTimer invalidate];
+	_tapHealthTimer = nil;
+}
+
+- (void)_tapHealthTimerFired:(NSTimer*)timer
+{
+	if(_eventPort == NULL || CGEventTapIsEnabled(_eventPort))
+		return;
+	
+	/* Never fight the system when it is intentionally withholding events:
+	   secure input (password fields) and the lock screen both disable taps. */
+	if(IsSecureEventInputEnabled())
+		return;
+	if([TPScreenLockWatcher isLocked])
+		return;
+	
+	NSLog(@"teleport: event tap was disabled by the system, re-enabling");
+	CGEventTapEnable(_eventPort, true);
+}
+
 - (void)_stopGettingEvents
 {
+	[self _stopTapHealthTimer];
+	
 	/* The tap is left installed and enabled, but from now on the callback
 	   passes every event through untouched (eventsListener is cleared by the
 	   caller right after this method). This avoids the system's
@@ -328,7 +383,13 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 
 - (void)startPostingEvents
 {
+	if(_eventSource != NULL) {
+		CFRelease(_eventSource);
+		_eventSource = NULL;
+	}
+	
 	_eventSource = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+	_lastReceivedEventDate = [NSDate timeIntervalSinceReferenceDate];
 	_mouseLocationValid = NO;
 	[self invalidateScreenCache];
 }

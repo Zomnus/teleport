@@ -53,6 +53,10 @@
 	NSTimer * _mouseFlushTimer;
 	
 	NSTimeInterval _lastPostedEventDate;
+	
+	/* Separate timestamp for the receiving side: the display wake-up must not
+	   depend on the capture-side "skip first event" marker. */
+	NSTimeInterval _lastReceivedEventDate;
 }
 
 + (TPEventsController*)defaultController;
@@ -77,6 +81,12 @@
 /* Screen geometry is cached and only rebuilt when the display configuration
    changes (see TPMainController's applicationDidChangeScreenParameters). */
 - (void)invalidateScreenCache;
+
+/* Invalidates the cache on every concrete controller singleton. The client
+   may use TPDirectEventTapsController while [self defaultController] returns
+   TPEventTapsController, so invalidating only the latter misses the one that
+   is actually forwarding events. */
++ (void)invalidateScreenCaches;
 
 @end
 

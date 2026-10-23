@@ -16,7 +16,6 @@
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
 
-#define CONNECTION_TIMEOUT 5.0
 #define SEND_TIMEOUT 2.0
 
 /* Bounded write queue: keeps the event tap / main thread from ever blocking on
@@ -203,6 +202,16 @@ static void _cfsocketCallback(CFSocketRef inCFSocketRef, CFSocketCallBackType in
 	int keepAlive = 1;
 	setsockopt(CFSocketGetNative(_cfSocket), SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(keepAlive));
 	
+	/* The default keepalive probes start after two hours, so a peer that went
+	   away while sleeping is never noticed. Keep the values conservative:
+	   probing too aggressively can drop a healthy idle Wi-Fi connection. */
+	int keepIdle = 60;
+	setsockopt(CFSocketGetNative(_cfSocket), IPPROTO_TCP, TCP_KEEPALIVE, &keepIdle, sizeof(keepIdle));
+	int keepInterval = 10;
+	setsockopt(CFSocketGetNative(_cfSocket), IPPROTO_TCP, TCP_KEEPINTVL, &keepInterval, sizeof(keepInterval));
+	int keepCount = 3;
+	setsockopt(CFSocketGetNative(_cfSocket), IPPROTO_TCP, TCP_KEEPCNT, &keepCount, sizeof(keepCount));
+	
 	[_sendCondition lock];
 	_sendFailed = NO;
 	_stopSendThread = NO;
@@ -328,7 +337,10 @@ static void _cfsocketCallback(CFSocketRef inCFSocketRef, CFSocketCallBackType in
 	
 	/* Connect */
 	CFDataRef addr = CFDataCreate(kCFAllocatorDefault, (void*)&address, sizeof(struct sockaddr_in));
-	CFSocketError socketError = CFSocketConnectToAddress(_cfSocket, addr, CONNECTION_TIMEOUT);
+	/* Start the connection in the background: a synchronous connect to a peer
+	   that is asleep blocked the main thread for the whole timeout and made
+	   the app look frozen. The connect callback reports the result. */
+	CFSocketError socketError = CFSocketConnectToAddress(_cfSocket, addr, -1.0);
 	if (socketError != kCFSocketSuccess) {
 		if(socketError == kCFSocketError) {
 			int err = errno;

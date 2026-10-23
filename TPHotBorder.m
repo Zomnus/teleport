@@ -100,6 +100,8 @@ static NSString * TPHotBorderDraggingInfoKey = @"TPHotBorderDraggingInfo";
 {
 	[_tapTimer invalidate];
 	_tapTimer = nil;
+	[_activateTimer invalidate];
+	_activateTimer = nil;
 	[self _discardFireAttempt];
 }
 

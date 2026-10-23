@@ -24,6 +24,7 @@
 	BOOL _stopRequestedFromCallback;
 	BOOL _tapOnMainRunLoop;
 	NSInteger _sessionGeneration;
+	NSTimer * _tapHealthTimer;
 }
 
 @end

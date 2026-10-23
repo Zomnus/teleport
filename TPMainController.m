@@ -91,6 +91,12 @@ static TPMainController * _mainController = nil;
 	_mainController = self;
 	_frontProcessNum.lo = 0;
 	
+	/* Agent apps get App Napped after a while, which throttles the event tap
+	   thread and makes forwarding feel sluggish. Keep the process responsive,
+	   but still allow the system to sleep when idle. */
+	_processActivity = [[NSProcessInfo processInfo] beginActivityWithOptions:NSActivityUserInitiatedAllowingIdleSystemSleep
+																	  reason:@"Low-latency keyboard and mouse forwarding"];
+	
 	/* Setup Notifications */
 	[[NSDistributedNotificationCenter defaultCenter] addObserver:self selector:@selector(_prefDidChange:) name:TPDefaultsDidChangeNotification object:nil];
 	[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_prefsDidUpgrade:) name:TPPreferencesDidUpgradeNotification object:nil];
@@ -164,6 +170,11 @@ static TPMainController * _mainController = nil;
 
 - (void)applicationWillTerminate:(NSNotification *)notification
 {
+	if(_processActivity != nil) {
+		[[NSProcessInfo processInfo] endActivity:_processActivity];
+		_processActivity = nil;
+	}
+	
 	[[TPHostsManager defaultManager] saveHosts];
 	[[TPAuthenticationManager defaultManager] saveHosts];
 	
@@ -191,7 +202,7 @@ static TPMainController * _mainController = nil;
 
 - (void)applicationDidChangeScreenParameters:(NSNotification *)aNotification
 {
-	[[TPEventsController defaultController] invalidateScreenCache];
+	[TPEventsController invalidateScreenCaches];
 	[[TPHostsManager defaultManager] notifyChanges];
 	
 	if([[TPServerController defaultController] allowControl]) {
