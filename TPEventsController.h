@@ -7,6 +7,7 @@
 //
 
 #import <Cocoa/Cocoa.h>
+#import <dispatch/dispatch.h>
 
 #define ESC_KEYCODE 53
 #define DISABLE_CONTROL 0
@@ -57,6 +58,13 @@
 	/* Separate timestamp for the receiving side: the display wake-up must not
 	   depend on the capture-side "skip first event" marker. */
 	NSTimeInterval _lastReceivedEventDate;
+	
+	/* Event injection runs on this serial queue. The socket callback delivers
+	   events on the main run loop; posting them from there meant that any UI
+	   work on the receiving Mac delayed forwarded input. All receiver-side
+	   state below is owned by this queue. */
+	dispatch_queue_t _postingQueue;
+	NSLock * _screenCacheLock;
 }
 
 + (TPEventsController*)defaultController;
@@ -104,6 +112,8 @@
 
 - (void)_updateMouseLocationWithMouseDelta:(TPMouseDelta)mouseDelta;
 - (void)_rebuildScreenCacheIfNeeded;
+- (void)_rebuildScreenCache;
+- (dispatch_queue_t)_postingQueue;
 - (uint64_t)_eventAgeForEvent:(id)event;
 - (CGEventTimestamp)_timestampForEventAge:(uint64_t)age;
 - (BOOL)_isCoalescableMouseEvent:(CGEventRef)event;

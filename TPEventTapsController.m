@@ -41,6 +41,12 @@ static const char * eventTypeName[] =
 - (void)_postEvent:(CGEventRef)event;
 - (void)_postEvent:(CGEventRef)event withTimestamp:(CGEventTimestamp)timestamp;
 
+/* Bodies that touch the event source and the virtual cursor run on the
+   posting queue (see TPEventsController's _postingQueue). */
+- (void)_postWarpToPosition:(NSPoint)position;
+- (void)_postMouseDownAtPosition:(NSPoint)position;
+- (void)_postMouseUpAtPosition:(NSPoint)position;
+
 - (BOOL)_shouldSkipFirstEvent:(id)e;
 - (BOOL)_isEmergencyStopEvent:(id)e;
 
@@ -383,25 +389,34 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 
 - (void)startPostingEvents
 {
-	if(_eventSource != NULL) {
-		CFRelease(_eventSource);
-		_eventSource = NULL;
-	}
-	
-	_eventSource = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
 	_lastReceivedEventDate = [NSDate timeIntervalSinceReferenceDate];
-	_mouseLocationValid = NO;
+	
+	/* Geometry is rebuilt here, on the main thread, so the posting queue only
+	   ever reads a complete snapshot. */
 	[self invalidateScreenCache];
+	
+	dispatch_sync([self _postingQueue], ^{
+		if(_eventSource != NULL) {
+			CFRelease(_eventSource);
+			_eventSource = NULL;
+		}
+		
+		_eventSource = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+		_mouseLocationValid = NO;
+	});
 }
 
 - (void)stopPostingEvents
 {
-	if(_eventSource != NULL) {
-		CFRelease(_eventSource);
-		_eventSource = NULL;
-	}
-	
-	_mouseLocationValid = NO;
+	/* Wait for the events already queued to be posted, then drop the source. */
+	dispatch_sync([self _postingQueue], ^{
+		if(_eventSource != NULL) {
+			CFRelease(_eventSource);
+			_eventSource = NULL;
+		}
+		
+		_mouseLocationValid = NO;
+	});
 }
 
 - (void)_postEvent:(CGEventRef)event
@@ -755,6 +770,14 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 
 - (void)warpMouseToPosition:(NSPoint)position
 {
+	/* The virtual cursor and the event source are owned by the posting queue. */
+	dispatch_sync([self _postingQueue], ^{
+		[self _postWarpToPosition:position];
+	});
+}
+
+- (void)_postWarpToPosition:(NSPoint)position
+{
 	[super warpMouseToPosition:position];
 	
 	DebugLog(@"warp to %@", NSStringFromPoint(position));
@@ -795,6 +818,13 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 	
 - (void)mouseDownAtPosition:(NSPoint)position
 {
+	dispatch_sync([self _postingQueue], ^{
+		[self _postMouseDownAtPosition:position];
+	});
+}
+
+- (void)_postMouseDownAtPosition:(NSPoint)position
+{
 	[super mouseDownAtPosition:position];
 
 	CGEventRef event = CGEventCreateMouseEvent(_eventSource, kCGEventLeftMouseDown, _currentMouseLocation, kCGMouseButtonLeft);
@@ -806,6 +836,13 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 }
 
 - (void)mouseUpAtPosition:(NSPoint)position
+{
+	dispatch_sync([self _postingQueue], ^{
+		[self _postMouseUpAtPosition:position];
+	});
+}
+
+- (void)_postMouseUpAtPosition:(NSPoint)position
 {
 	[super mouseUpAtPosition:position];
 	

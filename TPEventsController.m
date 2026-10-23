@@ -20,11 +20,27 @@
 #import "TPHotBorder.h"
 #import "TPScreenLockWatcher.h"
 
-#define THREADED_EVENT_POSTING 0
-
 extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 
 @implementation TPEventsController
+
+- (instancetype) init
+{
+	self = [super init];
+	
+	if(self != nil) {
+		dispatch_queue_attr_t attributes = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
+		_postingQueue = dispatch_queue_create("teleport.eventpost", attributes);
+		_screenCacheLock = [[NSLock alloc] init];
+	}
+	
+	return self;
+}
+
+- (dispatch_queue_t)_postingQueue
+{
+	return _postingQueue;
+}
 
 + (TPEventsController*)defaultController
 {
@@ -255,24 +271,23 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 
 - (void)startPostingEvents
 {
-	_lastPostedEventDate = 0.0;
-	/* startControl already woke the display; do not wake it again on the very
-	   first forwarded event. */
 	_lastReceivedEventDate = [NSDate timeIntervalSinceReferenceDate];
-	_mouseLocationValid = NO;
+	
+	/* Rebuild the geometry on the main thread, then reset the receiver state
+	   on the posting queue so a new session never sees the previous one's
+	   cursor position. */
 	[self invalidateScreenCache];
+	dispatch_sync(_postingQueue, ^{
+		_lastPostedEventDate = 0.0;
+		_mouseLocationValid = NO;
+	});
 }
 
 - (void)stopPostingEvents
 {
-	
-}
-
-- (void)_threadedPostEventWithEventData:(NSData*)eventData
-{
-	@autoreleasepool {
-		[self _postEventWithEventData:eventData];
-	}
+	dispatch_sync(_postingQueue, ^{
+		_mouseLocationValid = NO;
+	});
 }
 
 - (void)postEventWithEventData:(NSData*)eventData
@@ -290,11 +305,14 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 	
 	_lastReceivedEventDate = now;
 	
-#if THREADED_EVENT_POSTING
-	[NSThread detachNewThreadSelector:@selector(_threadedPostEventWithEventData:) toTarget:self withObject:eventData];
-#else
-	[self _postEventWithEventData:eventData];
-#endif
+	/* Injection (decode + coordinate update + CGEventPost) runs off the main
+	   run loop: a busy main thread on the receiving Mac must not delay input.
+	   The queue is serial, so events keep their order. */
+	dispatch_async(_postingQueue, ^{
+		@autoreleasepool {
+			[self _postEventWithEventData:eventData];
+		}
+	});
 }
 
 - (void)_postEventWithEventData:(NSData*)eventData
@@ -353,10 +371,16 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 {
 	[self _rebuildScreenCacheIfNeeded];
 	
+	[_screenCacheLock lock];
+	NSArray * screenFrames = _cachedScreenFrames;
+	NSArray * screens = _cachedScreens;
+	CGFloat mainScreenHeight = _cachedMainScreenHeight;
+	[_screenCacheLock unlock];
+	
 	if(!_mouseLocationValid) {
 		NSPoint location = [NSEvent mouseLocation];
 		_currentMouseLocation.x = location.x;
-		_currentMouseLocation.y = _cachedMainScreenHeight - location.y;
+		_currentMouseLocation.y = mainScreenHeight - location.y;
 		_mouseLocationValid = YES;
 	}
 	
@@ -367,7 +391,7 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 	_currentMouseLocation.y += mouseDelta.y;
 	
 	NSUInteger i = 0;
-	for(NSValue * value in _cachedScreenFrames) {
+	for(NSValue * value in screenFrames) {
 		NSRect screenFrame = [value rectValue];
 		NSPoint relativePoint = CGPointMake(_currentMouseLocation.x - NSMinX(screenFrame),
 											_currentMouseLocation.y - NSMinY(screenFrame));
@@ -380,40 +404,79 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 	}
 	
 	/* Mouse cursor is outside: clamp it to the current screen. */
-	NSUInteger screenCount = [_cachedScreenFrames count];
+	NSUInteger screenCount = [screenFrames count];
 	if(screenCount == 0)
 		return;
 	
 	if(_currentScreenIndex < 0 || (NSUInteger)_currentScreenIndex >= screenCount)
 		_currentScreenIndex = 0;
 	
-	NSRect screenFrame = [[_cachedScreenFrames objectAtIndex:_currentScreenIndex] rectValue];
+	NSRect screenFrame = [[screenFrames objectAtIndex:_currentScreenIndex] rectValue];
 	_currentMouseLocation.x = MAX(NSMinX(screenFrame), MIN(_currentMouseLocation.x, NSMaxX(screenFrame) - 1.0));
 	_currentMouseLocation.y = MAX(NSMinY(screenFrame), MIN(_currentMouseLocation.y, NSMaxY(screenFrame) - 1.0));
 	
-	// When the cursor is clamped at the edge but the raw delta keeps pushing
-	// outward, treat it as a switch request even if no mouseEntered event was
-	// delivered (fast movement can jump over the 3pt strip). This also covers
-	// the locked-screen case below.
-	TPHotBorder *border = [[TPServerController defaultController] currentHotBorder];
-	if(border != nil) {
-		NSScreen * screen = (NSUInteger)_currentScreenIndex < [_cachedScreens count] ? [_cachedScreens objectAtIndex:_currentScreenIndex] : nil;
-		if (screen == [border screen]) {
-			// _currentMouseLocation is relative to the left-top corner of the main screen.
-			// while borderRect is relative to the left-bottom corner of the main screen.
-			CGPoint mouseLocationInvertY = CGPointMake(_currentMouseLocation.x, _cachedMainScreenHeight - _currentMouseLocation.y);
-			/* Inset by -1 so that clamping exactly onto a border edge
-			   (notably the top edge) still counts as inside. */
-			if (CGRectContainsPoint(CGRectInset(border.frame, -1.0, -1.0), mouseLocationInvertY)) {
-				[border fireFromOutwardPushAtScreenPoint:NSPointFromCGPoint(mouseLocationInvertY)];
-			}
-		}
-	}
+	/* When the cursor is clamped at the edge but the raw delta keeps pushing
+	   outward, treat it as a switch request even if no mouseEntered event was
+	   delivered (fast movement can jump over the 3pt strip). This also covers
+	   the locked-screen case below.
+	   
+	   The return border is AppKit UI, so the check runs on the main thread;
+	   only clamped edges get here, which is rare. */
+	NSScreen * screen = ((NSUInteger)_currentScreenIndex < [screens count]) ? [screens objectAtIndex:_currentScreenIndex] : nil;
+	CGPoint mouseLocationInvertY = CGPointMake(_currentMouseLocation.x, mainScreenHeight - _currentMouseLocation.y);
+	
+	dispatch_async(dispatch_get_main_queue(), ^{
+		TPHotBorder * border = [[TPServerController defaultController] currentHotBorder];
+		if(border == nil || screen == nil || screen != [border screen])
+			return;
+		/* Inset by -1 so that clamping exactly onto a border edge (notably the
+		   top edge) still counts as inside. */
+		if(CGRectContainsPoint(CGRectInset(border.frame, -1.0, -1.0), mouseLocationInvertY))
+			[border fireFromOutwardPushAtScreenPoint:NSPointFromCGPoint(mouseLocationInvertY)];
+	});
 }
 
 - (void)invalidateScreenCache
 {
-	_screenCacheValid = NO;
+	/* NSScreen queries must stay on the main thread; the posting queue only
+	   reads the immutable snapshot built here. */
+	if([NSThread isMainThread]) {
+		[self _rebuildScreenCache];
+	}
+	else {
+		dispatch_async(dispatch_get_main_queue(), ^{
+			[self _rebuildScreenCache];
+		});
+	}
+}
+
+- (void)_rebuildScreenCache
+{
+	NSArray * screens = [NSScreen screens];
+	NSScreen * mainScreen = [screens count] > 0 ? [screens objectAtIndex:0] : nil;
+	CGFloat mainScreenHeight = (mainScreen != nil) ? NSHeight([mainScreen frame]) : 0.0;
+	
+	NSMutableArray * frames = [NSMutableArray arrayWithCapacity:[screens count]];
+	NSEnumerator * screenEnum = [screens objectEnumerator];
+	NSScreen * screen;
+	
+	while((screen = [screenEnum nextObject]) != nil) {
+		NSRect frame = [screen frame];
+		/* Store frames in the top-left origin space used by
+		   _currentMouseLocation and CGEvent deltas. */
+		NSRect flippedFrame = NSMakeRect(NSMinX(frame),
+										 mainScreenHeight - NSMaxY(frame),
+										 NSWidth(frame),
+										 NSHeight(frame));
+		[frames addObject:[NSValue valueWithRect:flippedFrame]];
+	}
+	
+	[_screenCacheLock lock];
+	_cachedScreens = [screens copy];
+	_cachedScreenFrames = frames;
+	_cachedMainScreenHeight = mainScreenHeight;
+	_screenCacheValid = YES;
+	[_screenCacheLock unlock];
 }
 
 + (void)invalidateScreenCaches
@@ -448,31 +511,19 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 
 - (void)_rebuildScreenCacheIfNeeded
 {
-	if(_screenCacheValid)
+	[_screenCacheLock lock];
+	BOOL valid = _screenCacheValid;
+	[_screenCacheLock unlock];
+	
+	if(valid)
 		return;
 	
-	NSArray * screens = [NSScreen screens];
-	NSScreen * mainScreen = [screens count] > 0 ? [screens objectAtIndex:0] : nil;
-	_cachedMainScreenHeight = (mainScreen != nil) ? NSHeight([mainScreen frame]) : 0.0;
-	
-	NSMutableArray * frames = [NSMutableArray arrayWithCapacity:[screens count]];
-	NSEnumerator * screenEnum = [screens objectEnumerator];
-	NSScreen * screen;
-	
-	while((screen = [screenEnum nextObject]) != nil) {
-		NSRect frame = [screen frame];
-		/* Store frames in the top-left origin space used by
-		   _currentMouseLocation and CGEvent deltas. */
-		NSRect flippedFrame = NSMakeRect(NSMinX(frame),
-										 _cachedMainScreenHeight - NSMaxY(frame),
-										 NSWidth(frame),
-										 NSHeight(frame));
-		[frames addObject:[NSValue valueWithRect:flippedFrame]];
-	}
-	
-	_cachedScreens = [screens copy];
-	_cachedScreenFrames = frames;
-	_screenCacheValid = YES;
+	/* Called from the posting queue: geometry has to be queried on the main
+	   thread. This event uses the previous snapshot, which is at most one
+	   display change old. */
+	dispatch_async(dispatch_get_main_queue(), ^{
+		[self _rebuildScreenCache];
+	});
 }
 
 - (BOOL)event:(NSEvent*)event hasRequiredKeyIfNeeded:(BOOL)needed withTag:(NSEventType)tag
