@@ -15,7 +15,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "A7C9DEC8059F496500E67CB3"
-               BuildableName = "teleport.app"
+               BuildableName = "teleport-pro.app"
                BlueprintName = "teleport"
                ReferencedContainer = "container:teleport.xcodeproj">
             </BuildableReference>
@@ -45,7 +45,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A7C9DEC8059F496500E67CB3"
-            BuildableName = "teleport.app"
+            BuildableName = "teleport-pro.app"
             BlueprintName = "teleport"
             ReferencedContainer = "container:teleport.xcodeproj">
          </BuildableReference>
@@ -62,7 +62,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A7C9DEC8059F496500E67CB3"
-            BuildableName = "teleport.app"
+            BuildableName = "teleport-pro.app"
             BlueprintName = "teleport"
             ReferencedContainer = "container:teleport.xcodeproj">
          </BuildableReference>

@@ -22,7 +22,7 @@
         </customObject>
         <customObject id="-1" userLabel="First Responder" customClass="FirstResponder"/>
         <customObject id="-3" userLabel="Application" customClass="NSObject"/>
-        <window title="teleport" allowsToolTipsWhenApplicationIsInactive="NO" autorecalculatesKeyViewLoop="NO" deferred="NO" releasedWhenClosed="NO" visibleAtLaunch="NO" animationBehavior="default" id="12" userLabel="PrefPane">
+        <window title="teleport-pro" allowsToolTipsWhenApplicationIsInactive="NO" autorecalculatesKeyViewLoop="NO" deferred="NO" releasedWhenClosed="NO" visibleAtLaunch="NO" animationBehavior="default" id="12" userLabel="PrefPane">
             <windowStyleMask key="styleMask" titled="YES" closable="YES" miniaturizable="YES" resizable="YES"/>
             <rect key="contentRect" x="517" y="450" width="800" height="600"/>
             <rect key="screenRect" x="0.0" y="0.0" width="1920" height="1055"/>
@@ -381,7 +381,7 @@
                     <textField focusRingType="none" verticalHuggingPriority="750" horizontalCompressionResistancePriority="250" fixedFrame="YES" preferredMaxLayoutWidth="257" translatesAutoresizingMaskIntoConstraints="NO" id="165">
                         <rect key="frame" x="17" y="129" width="261" height="22"/>
                         <autoresizingMask key="autoresizingMask"/>
-                        <textFieldCell key="cell" sendsActionOnEndEditing="YES" alignment="center" title="teleport" id="100165">
+                        <textFieldCell key="cell" sendsActionOnEndEditing="YES" alignment="center" title="teleport-pro" id="100165">
                             <font key="font" metaFont="systemBold" size="18"/>
                             <color key="textColor" name="controlTextColor" catalog="System" colorSpace="catalog"/>
                             <color key="backgroundColor" name="controlColor" catalog="System" colorSpace="catalog"/>
@@ -401,7 +401,8 @@
                         <autoresizingMask key="autoresizingMask"/>
                         <textFieldCell key="cell" sendsActionOnEndEditing="YES" alignment="left" id="100168" userLabel="About">
                             <font key="font" metaFont="system" size="10"/>
-                            <string key="title">A Virtual KVM for macOS. Maintained by John Britton.
+                            <string key="title">A Virtual KVM for macOS.
+Forked from johndbritton/teleport.
 Based on an idea by Dave Sag and Jeremy Quinn.
 Special thanks to Manu02, Julien and Paul.</string>
                             <color key="textColor" name="controlTextColor" catalog="System" colorSpace="catalog"/>
@@ -411,7 +412,7 @@ Special thanks to Manu02, Julien and Paul.</string>
                     <textField focusRingType="none" verticalHuggingPriority="750" horizontalCompressionResistancePriority="250" fixedFrame="YES" preferredMaxLayoutWidth="64" translatesAutoresizingMaskIntoConstraints="NO" id="291" userLabel="➤ Website" customClass="TPLinkTextField">
                         <rect key="frame" x="12" y="8" width="68" height="17"/>
                         <autoresizingMask key="autoresizingMask" widthSizable="YES"/>
-                        <textFieldCell key="cell" selectable="YES" sendsActionOnEndEditing="YES" title="➤ Website" placeholderString="https://johndbritton.com/teleport" id="100291" userLabel="➤ Website">
+                        <textFieldCell key="cell" selectable="YES" sendsActionOnEndEditing="YES" title="➤ Website" placeholderString="https://github.com/Zomnus/teleport-pro" id="100291" userLabel="➤ Website">
                             <font key="font" metaFont="message" size="11"/>
                             <color key="textColor" name="controlTextColor" catalog="System" colorSpace="catalog"/>
                             <color key="backgroundColor" name="controlColor" catalog="System" colorSpace="catalog"/>
@@ -420,7 +421,7 @@ Special thanks to Manu02, Julien and Paul.</string>
                     <textField focusRingType="none" verticalHuggingPriority="750" horizontalCompressionResistancePriority="250" fixedFrame="YES" preferredMaxLayoutWidth="65" translatesAutoresizingMaskIntoConstraints="NO" id="292" userLabel="➤ Support" customClass="TPLinkTextField">
                         <rect key="frame" x="119" y="8" width="69" height="17"/>
                         <autoresizingMask key="autoresizingMask" widthSizable="YES"/>
-                        <textFieldCell key="cell" sendsActionOnEndEditing="YES" title="➤ Support" placeholderString="https://github.com/johndbritton/teleport/issues/new/choose" id="100292" userLabel="➤ Support">
+                        <textFieldCell key="cell" sendsActionOnEndEditing="YES" title="➤ Support" placeholderString="https://github.com/Zomnus/teleport-pro/issues/new/choose" id="100292" userLabel="➤ Support">
                             <font key="font" metaFont="message" size="11"/>
                             <color key="textColor" name="controlTextColor" catalog="System" colorSpace="catalog"/>
                             <color key="backgroundColor" name="controlColor" catalog="System" colorSpace="catalog"/>
@@ -429,7 +430,7 @@ Special thanks to Manu02, Julien and Paul.</string>
                     <textField focusRingType="none" verticalHuggingPriority="750" horizontalCompressionResistancePriority="250" fixedFrame="YES" preferredMaxLayoutWidth="63" translatesAutoresizingMaskIntoConstraints="NO" id="293" userLabel="➤ License" customClass="TPLinkTextField">
                         <rect key="frame" x="228" y="8" width="67" height="17"/>
                         <autoresizingMask key="autoresizingMask" widthSizable="YES"/>
-                        <textFieldCell key="cell" sendsActionOnEndEditing="YES" title="➤ License" placeholderString="https://github.com/johndbritton/teleport/blob/main/LICENSE" id="100293" userLabel="➤ License">
+                        <textFieldCell key="cell" sendsActionOnEndEditing="YES" title="➤ License" placeholderString="https://github.com/Zomnus/teleport-pro/blob/main/LICENSE" id="100293" userLabel="➤ License">
                             <font key="font" metaFont="message" size="11"/>
                             <color key="textColor" name="controlTextColor" catalog="System" colorSpace="catalog"/>
                             <color key="backgroundColor" name="controlColor" catalog="System" colorSpace="catalog"/>

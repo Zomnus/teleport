@@ -197,7 +197,7 @@
 		A7033E250CF0AB8C004AFBEA /* remove.tiff */ = {isa = PBXFileReference; lastKnownFileType = image.tiff; path = remove.tiff; sourceTree = "<group>"; };
 		A7033F3D0CF10E6C004AFBEA /* sharedscreen.tiff */ = {isa = PBXFileReference; lastKnownFileType = image.tiff; path = sharedscreen.tiff; sourceTree = "<group>"; };
 		A70901850CD007B6006576A6 /* icon-about.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "icon-about.png"; sourceTree = "<group>"; };
-		A70AE0D714674AD100A76119 /* teleport.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = teleport.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A70AE0D714674AD100A76119 /* teleport-pro.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "teleport-pro.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		A71221CC1159899E00DCD93B /* MultipleFiles.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = MultipleFiles.icns; sourceTree = "<group>"; };
 		A71E0B901AB4210E00911ACB /* Sparkle.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = Sparkle.framework; sourceTree = "<group>"; };
 		A71EA8C60A12688400805CC6 /* TPBackgroundImageTransfer.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = TPBackgroundImageTransfer.h; sourceTree = "<group>"; };
@@ -908,7 +908,7 @@
 			);
 			name = teleport;
 			productName = Daemon;
-			productReference = A70AE0D714674AD100A76119 /* teleport.app */;
+			productReference = A70AE0D714674AD100A76119 /* teleport-pro.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -1147,7 +1147,7 @@
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
 				COPY_PHASE_STRIP = YES;
-				CURRENT_PROJECT_VERSION = 1.4.6;
+				CURRENT_PROJECT_VERSION = 1.4.7;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
 				EXCLUDED_ARCHS = "";
@@ -1162,7 +1162,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 11.5;
 				OTHER_LDFLAGS = "-Wl,-rpath,@loader_path/../Frameworks";
 				PRODUCT_BUNDLE_IDENTIFIER = com.abyssoft.teleport;
-				PRODUCT_NAME = teleport;
+				PRODUCT_NAME = "teleport-pro";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SYSTEM_FRAMEWORK_SEARCH_PATHS = "$(inherited) $(SYSTEM_LIBRARY_DIR)/PrivateFrameworks";
 			};
@@ -1176,7 +1176,7 @@
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1.4.6;
+				CURRENT_PROJECT_VERSION = 1.4.7;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
 				EXCLUDED_ARCHS = "";
@@ -1191,7 +1191,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 11.5;
 				OTHER_LDFLAGS = "-Wl,-rpath,@loader_path/../Frameworks";
 				PRODUCT_BUNDLE_IDENTIFIER = com.abyssoft.teleport;
-				PRODUCT_NAME = teleport;
+				PRODUCT_NAME = "teleport-pro";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SYSTEM_FRAMEWORK_SEARCH_PATHS = "$(inherited) $(SYSTEM_LIBRARY_DIR)/PrivateFrameworks";
 			};
@@ -1290,7 +1290,7 @@
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1.4.6;
+				CURRENT_PROJECT_VERSION = 1.4.7;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
 				EXCLUDED_ARCHS = "";
@@ -1305,7 +1305,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 11.5;
 				OTHER_LDFLAGS = "-Wl,-rpath,@loader_path/../Frameworks";
 				PRODUCT_BUNDLE_IDENTIFIER = com.abyssoft.teleport;
-				PRODUCT_NAME = teleport;
+				PRODUCT_NAME = "teleport-pro";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SYSTEM_FRAMEWORK_SEARCH_PATHS = "$(inherited) $(SYSTEM_LIBRARY_DIR)/PrivateFrameworks";
 			};

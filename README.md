@@ -1,16 +1,19 @@
-# Teleport
+# teleport-pro
 ## A Virtual KVM for macOS
 
-[![Release](https://img.shields.io/badge/release-v1.4.6-blue)](https://github.com/Zomnus/teleport/releases/latest)
+[![Release](https://img.shields.io/badge/release-v1.4.7-blue)](https://github.com/Zomnus/teleport-pro/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-macOS%2012%2B-lightgrey)](#installation)
 
 Use one keyboard and pointing device to control multiple Macs.
 
+> Forked from [johndbritton/teleport](https://github.com/johndbritton/teleport).
+> This repository is maintained independently; the upstream is no longer updated and this project does not sync with it.
+
 ---
 
-## 本次优化说明（v1.4 → v1.4.6）
+## 本次优化说明（v1.4 → v1.4.7）
 
-本仓库基于 [abyssoft/teleport](https://github.com/abyssoft/teleport) 的公开源码，针对两台 Mac 之间切换键鼠时的「顺滑度」完成了一轮性能优化与稳定性修复，当前版本为 **v1.4.6**。
+本仓库 fork 自 [johndbritton/teleport](https://github.com/johndbritton/teleport)（原始作者 [abyssoft](https://github.com/abyssoft)）。上游已停止维护，本项目独立维护、不再与上游同步，仅保留来源记录。针对两台 Mac 之间切换键鼠时的「顺滑度」完成了一轮性能优化与稳定性修复，当前版本为 **v1.4.7**。
 
 完整的技术分析、延迟拆解、风险与实施记录见：
 
@@ -84,10 +87,17 @@ Use one keyboard and pointing device to control multiple Macs.
 - 按住鼠标的拖拽重新走 TCP：UDP 增量包无法还原原始按键标志与严格顺序，1.4.5 会导致窗口拖不动。悬停移动仍走 UDP。
 - 控制期间每秒检查一次光标可见性：被全屏应用或 Space 切换重新显示时再次隐藏；隐藏次数计入恢复计数，结束控制时按次数还原，不会出现控制结束后光标消失的问题。
 
+#### v1.4.7：项目更名为 teleport-pro
+
+- 应用名、可执行文件、偏好设置窗口与关于窗口中的名称统一改为 **teleport-pro**，图标沿用原设计。
+- 发布产物更名为 `teleport-pro-<version>-macos.zip`。
+- 仓库已退出上游 fork 网络并重命名为 `teleport-pro`，仅在 About 与 README 中保留 "Forked from johndbritton/teleport" 的来源记录。
+- 本次仅改名，未改动事件转发与网络协议，`PROTOCOL_VERSION` 仍为 21，与 v1.4.2 ~ v1.4.6 可互通。
+
 ### 兼容性提示
 
 - `PROTOCOL_VERSION = 21`：两台 Mac 必须同时升级到 v1.4.x，否则会提示协议版本不匹配（预期行为，避免新旧混用导致事件格式错乱）。
-- v1.4.4 ~ v1.4.6 均未改动协议，与 v1.4.2 / v1.4.3 可互通。
+- v1.4.4 ~ v1.4.7 均未改动协议，与 v1.4.2 / v1.4.3 可互通。
 - UDP 指针通道是可选项：两端都升级时自动启用，任一条件不满足（旧版本、防火墙、端口占用）都会自动回落到纯 TCP，不需要手动配置。
 - 首次运行仍需在「系统设置 → 隐私与安全性 → 辅助功能」中授权。
 
@@ -103,9 +113,9 @@ Use one keyboard and pointing device to control multiple Macs.
 
 #### Manual
 
-1. Download the [latest release](https://github.com/Zomnus/teleport/releases/latest).
+1. Download the [latest release](https://github.com/Zomnus/teleport-pro/releases/latest).
 2. Unzip the archive.
-3. Drag `Teleport.app` to `/Applications`.
+3. Drag `teleport-pro.app` to `/Applications`.
 
 The release archive is a universal binary (`arm64` + `x86_64`), ad-hoc signed, and requires macOS 12 or later.
 
