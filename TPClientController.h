@@ -40,6 +40,15 @@ typedef NS_ENUM(NSInteger, TPClientState) {
 	
 	/* Controller whose tap buffers movement while the switch is negotiated. */
 	TPEventsController * _bufferingEventsController;
+	
+	/* Optional UDP pointer channel (see the server side for the token). */
+	int _pointerSocket;
+	uint32_t _pointerAddress;
+	uint16_t _pointerPort;
+	uint64_t _pointerToken;
+	uint32_t _pointerSequence;
+	uint32_t _pointerSendFailures;
+	BOOL _pointerChannelActive;
 }
 
 + (TPClientController*)defaultController;

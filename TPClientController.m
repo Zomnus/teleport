@@ -30,6 +30,14 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
+
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <unistd.h>
+#include <libkern/OSByteOrder.h>
 
 #include <mach/mach_port.h>
 #include <mach/mach_interface.h>
@@ -59,6 +67,13 @@ static TPClientController * _defaultClientController = nil;
 - (void)_beginBufferingForPendingSwitchToHost:(TPRemoteHost*)remoteHost;
 - (void)_cancelBufferingForPendingSwitch;
 
+/* Optional UDP pointer channel. */
+- (void)_startPointerChannelWithToken:(uint64_t)token;
+- (void)_stopPointerChannel;
+- (void)_pointerProbeThreadMain;
+- (BOOL)_sendPointerDelta:(TPMouseDelta)delta buttons:(uint8_t)buttons ageMs:(uint32_t)ageMs;
+- (uint32_t)_ipv4AddressForString:(NSString*)addressString;
+
 @end
 
 @implementation TPClientController
@@ -79,6 +94,7 @@ static TPClientController * _defaultClientController = nil;
 	_hotKeys = [[NSMutableDictionary alloc] init];
 	_sleepService = IO_OBJECT_NULL;
 	_state = TPClientIdleState;
+	_pointerSocket = -1;
 	
 	[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(updateTriggers:) name:TPHostDidUpdateNotification object:nil];
 	
@@ -401,6 +417,197 @@ static TPClientController * _defaultClientController = nil;
 	_bufferingEventsController = nil;
 }
 
+
+#pragma mark -
+#pragma mark Pointer channel (UDP)
+
+- (uint32_t)_ipv4AddressForString:(NSString*)addressString
+{
+	if([addressString length] == 0)
+		return 0;
+	
+	struct in_addr address;
+	if(inet_pton(AF_INET, [addressString UTF8String], &address) == 1)
+		return address.s_addr;
+	
+	struct hostent * host = gethostbyname([addressString cStringUsingEncoding:NSASCIIStringEncoding]);
+	if(host == NULL || host->h_addr_list == NULL || host->h_addr_list[0] == NULL)
+		return 0;
+	
+	memcpy(&address, host->h_addr_list[0], sizeof(address));
+	return address.s_addr;
+}
+
+- (void)_startPointerChannelWithToken:(uint64_t)token
+{
+	[self _stopPointerChannel];
+	
+	TPRemoteHost * host = [[self currentConnection] connectedHost];
+	if(host == nil)
+		return;
+	
+	uint32_t address = [self _ipv4AddressForString:[host address]];
+	if(address == 0) {
+		DebugLog(@"pointer channel: cannot resolve %@", [host address]);
+		return;
+	}
+	
+	int sock = socket(AF_INET, SOCK_DGRAM, 0);
+	if(sock < 0) {
+		DebugLog(@"pointer channel: cannot create socket (%d)", errno);
+		return;
+	}
+	
+	struct timeval timeout;
+	timeout.tv_sec = 0;
+	timeout.tv_usec = 120000;
+	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+	
+	@synchronized(self) {
+		_pointerSocket = sock;
+		_pointerAddress = address;
+		_pointerPort = htons([[TPPreferencesManager sharedPreferencesManager] portForPref:COMMAND_PORT] + TP_POINTER_CHANNEL_PORT_OFFSET);
+		_pointerToken = token;
+		_pointerSequence = 0;
+		_pointerSendFailures = 0;
+		_pointerChannelActive = YES;
+	}
+	
+	[NSThread detachNewThreadSelector:@selector(_pointerProbeThreadMain) toTarget:self withObject:nil];
+}
+
+- (void)_stopPointerChannel
+{
+	/* Remove the sender first: no new movement may be routed to the socket
+	   while it is being closed. */
+	[[self eventsController] setPointerDeltaSender:nil];
+	
+	int sock = -1;
+	@synchronized(self) {
+		sock = _pointerSocket;
+		_pointerSocket = -1;
+		_pointerToken = 0;
+		_pointerSequence = 0;
+		_pointerSendFailures = 0;
+		_pointerChannelActive = NO;
+	}
+	
+	if(sock >= 0)
+		close(sock);
+}
+
+- (void)_pointerProbeThreadMain
+{
+	@autoreleasepool {
+		int sock;
+		uint64_t token;
+		uint32_t address;
+		uint16_t port;
+		
+		@synchronized(self) {
+			sock = _pointerSocket;
+			token = _pointerToken;
+			address = _pointerAddress;
+			port = _pointerPort;
+		}
+		
+		if(sock < 0)
+			return;
+		
+		struct sockaddr_in destination;
+		memset(&destination, 0, sizeof(destination));
+		destination.sin_family = AF_INET;
+		destination.sin_addr.s_addr = address;
+		destination.sin_port = port;
+		
+		TPPointerPacket hello;
+		memset(&hello, 0, sizeof(hello));
+		hello.token = OSSwapHostToBigInt64(token);
+		hello.kind = TPPointerPacketHello;
+		
+		TPPointerPacket packet;
+		BOOL ready = NO;
+		
+		/* Try a few times before giving up: UDP on a busy link can drop the
+		   probe, but a failed probe must not cost more than ~400ms. */
+		int attempt;
+		for(attempt = 0; attempt < 3 && !ready; attempt++) {
+			sendto(sock, &hello, sizeof(hello), 0, (struct sockaddr *)&destination, sizeof(destination));
+			
+			struct sockaddr_in from;
+			socklen_t fromLength = sizeof(from);
+			ssize_t length = recvfrom(sock, &packet, sizeof(packet), 0, (struct sockaddr *)&from, &fromLength);
+			
+			if(length >= (ssize_t)sizeof(TPPointerPacket) &&
+			   packet.kind == TPPointerPacketHelloAck &&
+			   OSSwapBigToHostInt64(packet.token) == token)
+				ready = YES;
+		}
+		
+		if(!ready) {
+			DebugLog(@"pointer channel: no acknowledgement, staying on tcp");
+			[self _stopPointerChannel];
+			return;
+		}
+		
+		DebugLog(@"pointer channel: ready");
+		
+		dispatch_async(dispatch_get_main_queue(), ^{
+			if(![self isControlling] || !_pointerChannelActive)
+				return;
+			
+			[[self eventsController] setPointerDeltaSender:^BOOL(TPMouseDelta delta, uint8_t buttons, uint32_t ageMs) {
+				return [self _sendPointerDelta:delta buttons:buttons ageMs:ageMs];
+			}];
+		});
+	}
+}
+
+- (BOOL)_sendPointerDelta:(TPMouseDelta)delta buttons:(uint8_t)buttons ageMs:(uint32_t)ageMs
+{
+	if(delta.x == 0 && delta.y == 0)
+		return YES;
+	
+	@synchronized(self) {
+		if(_pointerSocket < 0 || !_pointerChannelActive)
+			return NO;
+		
+		TPPointerPacket packet;
+		memset(&packet, 0, sizeof(packet));
+		packet.token = OSSwapHostToBigInt64(_pointerToken);
+		packet.sequence = OSSwapHostToBigInt32(++_pointerSequence);
+		packet.ageMs = OSSwapHostToBigInt32(ageMs);
+		packet.buttons = buttons;
+		packet.kind = TPPointerPacketMove;
+		
+		int64_t deltaX = MAX((int64_t)-32768, MIN(delta.x, (int64_t)32767));
+		int64_t deltaY = MAX((int64_t)-32768, MIN(delta.y, (int64_t)32767));
+		packet.deltaX = (int16_t)OSSwapHostToBigInt16((int16_t)deltaX);
+		packet.deltaY = (int16_t)OSSwapHostToBigInt16((int16_t)deltaY);
+		
+		struct sockaddr_in destination;
+		memset(&destination, 0, sizeof(destination));
+		destination.sin_family = AF_INET;
+		destination.sin_addr.s_addr = _pointerAddress;
+		destination.sin_port = _pointerPort;
+		
+		ssize_t sent = sendto(_pointerSocket, &packet, sizeof(packet), 0, (struct sockaddr *)&destination, sizeof(destination));
+		
+		if(sent == (ssize_t)sizeof(packet)) {
+			_pointerSendFailures = 0;
+			return YES;
+		}
+		
+		/* Fall back to TCP for this event; give up entirely after a run of
+		   failures instead of retrying a broken path forever. */
+		_pointerSendFailures++;
+		if(_pointerSendFailures > 20)
+			_pointerChannelActive = NO;
+		
+		return NO;
+	}
+}
+
 - (void)_controlRequestDidTimeout:(NSTimer*)timer
 {
 	_controlRequestTimer = nil;
@@ -663,6 +870,9 @@ static TPClientController * _defaultClientController = nil;
 		/* Deactivate events recorder */
 		[[self eventsController] stopGettingEvents];
 		
+		/* Close the optional UDP pointer channel for this session. */
+		[self _stopPointerChannel];
+		
 		/* Deactivate bezel */
 		[[TPBezelController defaultController] hideBezel];
 		
@@ -851,8 +1061,22 @@ void TPSleepCallback(void * refCon, io_service_t service, natural_t messageType,
 #endif
 	switch(type) {
 		case TPControlSuccessMsgType:
+		{
+			NSData * pointerTokenData = [[message infoDict] objectForKey:TPMsgPointerTokenKey];
+			BOOL wasControlling = [self isControlling];
+			
 			[self startControl];
+			
+			/* Only a fresh session opens the optional UDP pointer channel;
+			   a duplicated acknowledgement must not reopen it. */
+			if(!wasControlling && [self isControlling] && [pointerTokenData length] == sizeof(uint64_t)) {
+				uint64_t token = 0;
+				[pointerTokenData getBytes:&token length:sizeof(token)];
+				[self _startPointerChannelWithToken:token];
+			}
+			
 			break;
+		}
 		case TPControlFailureMsgType:
 		{
 			TPRemoteHost * controlledHost = [[self currentConnection] connectedHost];

@@ -412,6 +412,11 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 		
 		_eventSource = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
 		_mouseLocationValid = NO;
+		
+		[_pointerQueueLock lock];
+		_pointerQueueHead = 0;
+		_pointerQueueCount = 0;
+		[_pointerQueueLock unlock];
 	});
 }
 

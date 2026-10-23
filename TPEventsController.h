@@ -72,6 +72,17 @@
 	NSMutableArray * _pendingSwitchEvents;
 	BOOL _bufferingPendingSwitch;
 	NSTimeInterval _pendingSwitchStartDate;
+	
+	/* Receiver side of the optional UDP pointer channel: the socket thread
+	   queues deltas here, the posting queue drains and injects them in order. */
+	TPPointerDelta _pointerQueue[256];
+	NSUInteger _pointerQueueHead;
+	NSUInteger _pointerQueueCount;
+	NSLock * _pointerQueueLock;
+	
+	/* Capture side: when set, mouse movement is sent through this block instead
+	   of the ordered TCP stream. Returning NO falls back for that event. */
+	BOOL (^_pointerDeltaSender)(TPMouseDelta delta, uint8_t buttons, uint32_t ageMs);
 }
 
 + (TPEventsController*)defaultController;
@@ -87,6 +98,11 @@
 - (void)beginBufferingForPendingSwitch;
 - (void)commitBufferedSwitchEvents;
 - (void)cancelBufferedSwitchEvents;
+
+/* Optional UDP pointer channel. The sender block is invoked from the event tap
+   thread; it must return NO when the movement has to go through TCP instead. */
+- (void)setPointerDeltaSender:(BOOL (^)(TPMouseDelta delta, uint8_t buttons, uint32_t ageMs))sender;
+- (void)queuePointerDelta:(TPPointerDelta)delta;
 
 - (void)startPostingEvents;
 - (void)stopPostingEvents;
@@ -122,11 +138,14 @@
 - (NSEvent*)_nsEventFromEvent:(id)event;
 - (NSData*)_eventDataFromEvent:(id)event;
 - (void)_postEventWithEventData:(NSData*)eventData;
+- (void)_postEvent:(CGEventRef)event withTimestamp:(CGEventTimestamp)timestamp;
 
 - (void)_updateMouseLocationWithMouseDelta:(TPMouseDelta)mouseDelta;
 - (void)_rebuildScreenCacheIfNeeded;
 - (void)_rebuildScreenCache;
 - (dispatch_queue_t)_postingQueue;
+- (void)_drainPointerDeltas;
+- (void)_applyPointerDelta:(TPPointerDelta)delta;
 - (uint64_t)_eventAgeForEvent:(id)event;
 - (CGEventTimestamp)_timestampForEventAge:(uint64_t)age;
 - (BOOL)_isCoalescableMouseEvent:(CGEventRef)event;

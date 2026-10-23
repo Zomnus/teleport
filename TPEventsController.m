@@ -27,6 +27,8 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 #define TP_PENDING_SWITCH_MAX_AGE 0.08
 #define TP_PENDING_SWITCH_MAX_EVENTS 48
 
+#define TP_POINTER_QUEUE_CAPACITY 256
+
 @implementation TPEventsController
 
 - (instancetype) init
@@ -37,6 +39,7 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 		dispatch_queue_attr_t attributes = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
 		_postingQueue = dispatch_queue_create("teleport.eventpost", attributes);
 		_screenCacheLock = [[NSLock alloc] init];
+		_pointerQueueLock = [[NSLock alloc] init];
 	}
 	
 	return self;
@@ -176,7 +179,44 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 	CGEventSetIntegerValueField(event, kCGMouseEventDeltaX, deltaX);
 	CGEventSetIntegerValueField(event, kCGMouseEventDeltaY, deltaY);
 	
-	[self _deliverEventToListener:(__bridge id)event];
+	/* Prefer the optional UDP pointer channel: it keeps a lost packet from
+	   stalling the ordered stream that carries keys and buttons. */
+	id sender = nil;
+	@synchronized(self) {
+		sender = _pointerDeltaSender;
+	}
+	
+	BOOL sentOverPointerChannel = NO;
+	if(sender != nil) {
+		uint8_t buttons = 0;
+		switch(_pendingMouseType) {
+			case kCGEventLeftMouseDragged:
+				buttons = 0x1;
+				break;
+			case kCGEventRightMouseDragged:
+				buttons = 0x2;
+				break;
+			case kCGEventOtherMouseDragged:
+				buttons = 0x4;
+				break;
+			default:
+				break;
+		}
+		
+		TPMouseDelta delta = { deltaX, deltaY };
+		uint64_t age = [self _eventAgeForEvent:(__bridge id)event];
+		
+		sentOverPointerChannel = ((BOOL (^)(TPMouseDelta, uint8_t, uint32_t))sender)(delta, buttons, (uint32_t)(age / 1000000ULL));
+	}
+	
+	if(!sentOverPointerChannel) {
+		[self _deliverEventToListener:(__bridge id)event];
+	}
+	else {
+		/* Keep the "first event" bookkeeping in sync: the pointer channel is
+		   still a delivered event as far as the capture side is concerned. */
+		_lastPostedEventDate = [NSDate timeIntervalSinceReferenceDate];
+	}
 	CFRelease(event);
 }
 
@@ -378,6 +418,11 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 	dispatch_sync(_postingQueue, ^{
 		_lastPostedEventDate = 0.0;
 		_mouseLocationValid = NO;
+		
+		[_pointerQueueLock lock];
+		_pointerQueueHead = 0;
+		_pointerQueueCount = 0;
+		[_pointerQueueLock unlock];
 	});
 }
 
@@ -386,6 +431,91 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 	dispatch_sync(_postingQueue, ^{
 		_mouseLocationValid = NO;
 	});
+}
+
+- (void)setPointerDeltaSender:(BOOL (^)(TPMouseDelta delta, uint8_t buttons, uint32_t ageMs))sender
+{
+	@synchronized(self) {
+		_pointerDeltaSender = [sender copy];
+	}
+}
+
+- (void)queuePointerDelta:(TPPointerDelta)delta
+{
+	[_pointerQueueLock lock];
+	
+	if(_pointerQueueCount < TP_POINTER_QUEUE_CAPACITY) {
+		NSUInteger tail = (_pointerQueueHead + _pointerQueueCount) % TP_POINTER_QUEUE_CAPACITY;
+		_pointerQueue[tail] = delta;
+		_pointerQueueCount++;
+	}
+	else {
+		/* Overrun: drop the oldest so the cursor keeps following recent input. */
+		_pointerQueue[_pointerQueueHead] = delta;
+		_pointerQueueHead = (_pointerQueueHead + 1) % TP_POINTER_QUEUE_CAPACITY;
+	}
+	
+	[_pointerQueueLock unlock];
+	
+	dispatch_async(_postingQueue, ^{
+		[self _drainPointerDeltas];
+	});
+}
+
+- (void)_drainPointerDeltas
+{
+	for(;;) {
+		TPPointerDelta delta;
+		BOOL hasDelta = NO;
+		
+		[_pointerQueueLock lock];
+		if(_pointerQueueCount > 0) {
+			delta = _pointerQueue[_pointerQueueHead];
+			_pointerQueueHead = (_pointerQueueHead + 1) % TP_POINTER_QUEUE_CAPACITY;
+			_pointerQueueCount--;
+			hasDelta = YES;
+		}
+		[_pointerQueueLock unlock];
+		
+		if(!hasDelta)
+			break;
+		
+		[self _applyPointerDelta:delta];
+	}
+}
+
+- (void)_applyPointerDelta:(TPPointerDelta)delta
+{
+	if(delta.x == 0 && delta.y == 0)
+		return;
+	
+	TPMouseDelta mouseDelta = { delta.x, delta.y };
+	[self _updateMouseLocationWithMouseDelta:mouseDelta];
+	
+	CGEventType type = kCGEventMouseMoved;
+	CGMouseButton button = kCGMouseButtonLeft;
+	
+	if(delta.buttons & 0x1) {
+		type = kCGEventLeftMouseDragged;
+	}
+	else if(delta.buttons & 0x2) {
+		type = kCGEventRightMouseDragged;
+		button = kCGMouseButtonRight;
+	}
+	else if(delta.buttons & 0x4) {
+		type = kCGEventOtherMouseDragged;
+		button = kCGMouseButtonCenter;
+	}
+	
+	/* The event source belongs to the concrete controller and is attached in
+	   _postEvent:withTimestamp:. */
+	CGEventRef event = CGEventCreateMouseEvent(NULL, type, _currentMouseLocation, button);
+	if(event == NULL)
+		return;
+	
+	CGEventSetType(event, type);
+	[self _postEvent:event withTimestamp:[self _timestampForEventAge:(uint64_t)delta.ageMs * 1000000ULL]];
+	CFRelease(event);
 }
 
 - (void)postEventWithEventData:(NSData*)eventData
@@ -405,9 +535,12 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 	
 	/* Injection (decode + coordinate update + CGEventPost) runs off the main
 	   run loop: a busy main thread on the receiving Mac must not delay input.
-	   The queue is serial, so events keep their order. */
+	   The queue is serial, so events keep their order. Pointer deltas that
+	   arrived before this event are applied first, so the click lands where the
+	   user saw the cursor. */
 	dispatch_async(_postingQueue, ^{
 		@autoreleasepool {
+			[self _drainPointerDeltas];
 			[self _postEventWithEventData:eventData];
 		}
 	});
