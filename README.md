@@ -1,7 +1,7 @@
 # teleport-pro
 ## A Virtual KVM for macOS
 
-[![Release](https://img.shields.io/badge/release-v1.4.7-blue)](https://github.com/Zomnus/teleport-pro/releases/latest)
+[![Release](https://img.shields.io/badge/release-v1.4.8-blue)](https://github.com/Zomnus/teleport-pro/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-macOS%2012%2B-lightgrey)](#installation)
 
 Use one keyboard and pointing device to control multiple Macs.
@@ -11,9 +11,9 @@ Use one keyboard and pointing device to control multiple Macs.
 
 ---
 
-## 本次优化说明（v1.4 → v1.4.7）
+## 本次优化说明（v1.4 → v1.4.8）
 
-本仓库 fork 自 [johndbritton/teleport](https://github.com/johndbritton/teleport)（原始作者 [abyssoft](https://github.com/abyssoft)）。上游已停止维护，本项目独立维护、不再与上游同步，仅保留来源记录。针对两台 Mac 之间切换键鼠时的「顺滑度」完成了一轮性能优化与稳定性修复，当前版本为 **v1.4.7**。
+本仓库 fork 自 [johndbritton/teleport](https://github.com/johndbritton/teleport)（原始作者 [abyssoft](https://github.com/abyssoft)）。上游已停止维护，本项目独立维护、不再与上游同步，仅保留来源记录。针对两台 Mac 之间切换键鼠时的「顺滑度」完成了一轮性能优化与稳定性修复，当前版本为 **v1.4.8**。
 
 完整的技术分析、延迟拆解、风险与实施记录见：
 
@@ -94,10 +94,17 @@ Use one keyboard and pointing device to control multiple Macs.
 - 仓库已退出上游 fork 网络并重命名为 `teleport-pro`，仅在 About 与 README 中保留 "Forked from johndbritton/teleport" 的来源记录。
 - 本次仅改名，未改动事件转发与网络协议，`PROTOCOL_VERSION` 仍为 21，与 v1.4.2 ~ v1.4.6 可互通。
 
+#### v1.4.8 修复：菜单栏与弹出菜单点击无响应
+
+- 现象：远程控制时，菜单栏状态下拉菜单、弹出菜单中的条目可以悬停高亮，但点击无反应（例如点击 Teleport 状态栏菜单的 `Configure…` 打不开偏好设置）。
+- 根因：直通路径把源 Mac 的完整 CGEvent 归档原样传输，其中私有字段 107（WindowServer 连接标识）保留了发送端的值。该值在受控 Mac 上不属于任何本地连接，WindowServer 仍按坐标跟踪悬停并分发普通窗口点击，但 NSMenu 会丢弃连接标识不匹配的点击。macOS 27.2 收紧了该校验后问题暴露。
+- 修复：接收端在 `CGEventCreateFromData` 之后、注入之前将该字段清零，由本机 WindowServer 重新盖章，行为与旧的手写序列化路径一致；普通窗口、拖拽、键盘与滚动不受影响。
+- 协议未变，`PROTOCOL_VERSION` 仍为 21，可与 v1.4.2 ~ v1.4.7 互通。
+
 ### 兼容性提示
 
 - `PROTOCOL_VERSION = 21`：两台 Mac 必须同时升级到 v1.4.x，否则会提示协议版本不匹配（预期行为，避免新旧混用导致事件格式错乱）。
-- v1.4.4 ~ v1.4.7 均未改动协议，与 v1.4.2 / v1.4.3 可互通。
+- v1.4.4 ~ v1.4.8 均未改动协议，与 v1.4.2 / v1.4.3 可互通。
 - UDP 指针通道是可选项：两端都升级时自动启用，任一条件不满足（旧版本、防火墙、端口占用）都会自动回落到纯 TCP，不需要手动配置。
 - 首次运行仍需在「系统设置 → 隐私与安全性 → 辅助功能」中授权。
 

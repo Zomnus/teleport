@@ -67,6 +67,14 @@
 
 #define CGIsMouseEventType(event) (event == kCGEventMouseMoved) || (event == kCGEventLeftMouseDragged) || (event == kCGEventRightMouseDragged) || (event == kCGEventOtherMouseDragged)
 
+/* Private field carrying the WindowServer connection the event originated
+   from. An archived event keeps the sender's value, which does not belong to
+   any connection on the receiver: menus still track the pointer, but NSMenu
+   discards the injected click. Newly created events leave this field at zero
+   (the local WindowServer fills it in), which is exactly what the legacy
+   serialisation path produced, so clear it after unarchiving. */
+static const CGEventField TPPrivateEventConnectionField = (CGEventField)107;
+
 static TPDirectEventTapsController * _eventTapsController = nil;
 
 @implementation TPDirectEventTapsController
@@ -112,6 +120,9 @@ static TPDirectEventTapsController * _eventTapsController = nil;
 	
 	CGEventRef event = CGEventCreateFromData(NULL, (__bridge CFDataRef)rawEventData);
 	if(event == NULL) return;
+	
+	/* Drop the sender's WindowServer connection stamp before posting. */
+	CGEventSetIntegerValueField(event, TPPrivateEventConnectionField, 0);
 	
 	CGEventType eventType = CGEventGetType(event);
 	
