@@ -25,6 +25,7 @@ typedef struct CPSProcessSerNum	CPSProcessSerNum;
 	TPNetworkConfigurationWatcher * _networkConfigurationWatcher;
 	NSTimer * _wakeTimer;
 	id _processActivity;
+	BOOL _fullWakeRecovery;
 }
 
 + (TPMainController*)sharedController;

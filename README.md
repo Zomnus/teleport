@@ -1,7 +1,7 @@
 # teleport-pro
 ## A Virtual KVM for macOS
 
-[![Release](https://img.shields.io/badge/release-v1.4.10-blue)](https://github.com/Zomnus/teleport-pro/releases/latest)
+[![Release](https://img.shields.io/badge/release-v1.4.11-blue)](https://github.com/Zomnus/teleport-pro/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-macOS%2012%2B-lightgrey)](#installation)
 
 Use one keyboard and pointing device to control multiple Macs.
@@ -11,9 +11,9 @@ Use one keyboard and pointing device to control multiple Macs.
 
 ---
 
-## 本次优化说明（v1.4 → v1.4.10）
+## 本次优化说明（v1.4 → v1.4.11）
 
-本仓库 fork 自 [johndbritton/teleport](https://github.com/johndbritton/teleport)（原始作者 [abyssoft](https://github.com/abyssoft)）。上游已停止维护，本项目独立维护、不再与上游同步，仅保留来源记录。针对两台 Mac 之间切换键鼠时的「顺滑度」完成了一轮性能优化与稳定性修复，当前版本为 **v1.4.10**。
+本仓库 fork 自 [johndbritton/teleport](https://github.com/johndbritton/teleport)（原始作者 [abyssoft](https://github.com/abyssoft)）。上游已停止维护，本项目独立维护、不再与上游同步，仅保留来源记录。针对两台 Mac 之间切换键鼠时的「顺滑度」完成了一轮性能优化与稳定性修复，当前版本为 **v1.4.11**。
 
 完整的技术分析、延迟拆解、风险与实施记录见：
 
@@ -113,10 +113,24 @@ Use one keyboard and pointing device to control multiple Macs.
 - 修复：接收端在会话期间安装一个本地事件 tap，记录发送端当前按住的修饰键（Shift/Control/Option/Command），并仅对**本机真实硬件输入**的鼠标按下/抬起/拖拽事件补上这些标志；注入事件与普通输入不受影响。
 - 现在「Air 键盘 Shift + mini 触摸板」也能正常连选文件与选字；Air 触摸板 + Air 键盘的组合行为不变。协议未变，`PROTOCOL_VERSION` 仍为 21。
 
+#### v1.4.11 修复：睡眠锁屏约 1 小时后唤醒无法与另一台 Mac 通讯
+
+- 现象：两台 Mac 同时 sleep + lock 约一小时后，Air 的菜单里 mini 仍显示在线、本机光标正常，但鼠标移到屏幕边缘无法切换到 mini；重启 Air 上的 Teleport 立即恢复。
+- 根因：唤醒路径只恢复了「作为服务端」的共享，没有恢复「作为客户端」的链路；并且所有失败分支都是静默的，于是一次异常就会一直保持到重启进程：
+  - `computerDidWake` 只重启共享与触发器，不重启 Bonjour 浏览、不丢弃睡眠前缓存的 TCP 连接、不重建 hot border 与事件 tap；
+  - 事件 tap 只有 `CGEventTapEnable` 一条自愈路径，端口被系统 invalidate 后无法复活；锁屏状态只靠分布式通知，丢一条通知就会永久阻止重新使能；
+  - `TPClientController` 在「非在线 / 非空闲 / 连接无法创建」时直接 `return NO`，既不提示也不记录；
+  - Bonjour 解析只取第一个 IPv4 地址，双网卡的对端（如 mini 同时有有线和 Wi-Fi）可能解析到不可达的那条。
+- 修复：
+  - 唤醒（含显示器唤醒）后统一执行一次恢复：重查锁屏状态、复位客户端状态机、丢弃缓存连接、重建全部 hot border、销毁并重建事件 tap；系统唤醒还会重启 Bonjour 浏览并重建监听 socket 与广告。
+  - Bonjour 解析保留全部 IPv4 候选，优先与本机同子网的地址；连接失败时自动切换到下一个候选，并把实际可用的地址提升为首选。
+  - 所有切换失败分支补上 `NSLog` 与可见提示（连接失败沿用原有弹窗），不再静默。
+- 协议未变，`PROTOCOL_VERSION` 仍为 21。
+
 ### 兼容性提示
 
 - `PROTOCOL_VERSION = 21`：两台 Mac 必须同时升级到 v1.4.x，否则会提示协议版本不匹配（预期行为，避免新旧混用导致事件格式错乱）。
-- v1.4.4 ~ v1.4.10 均未改动协议，与 v1.4.2 / v1.4.3 可互通。
+- v1.4.4 ~ v1.4.11 均未改动协议，与 v1.4.2 / v1.4.3 可互通。
 - UDP 指针通道是可选项：两端都升级时自动启用，任一条件不满足（旧版本、防火墙、端口占用）都会自动回落到纯 TCP，不需要手动配置。
 - 首次运行仍需在「系统设置 → 隐私与安全性 → 辅助功能」中授权。
 

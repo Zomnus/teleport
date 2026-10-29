@@ -20,6 +20,9 @@
 #import <sys/types.h>
 #import <netinet/in.h>
 #import <netdb.h>
+#import <ifaddrs.h>
+#import <net/if.h>
+#import <string.h>
 
 #define SHOW_LOCALHOST DEBUG_BUILD
 #define RESOLVE_TIMEOUT 10.0
@@ -77,6 +80,68 @@ static void pingRemoteAsync(NSString *host) {
 		[task launch];
 		DebugLog(@"ping to %@ - start.", host);
 	});
+}
+
+/* A Mac that is on Ethernet and Wi-Fi at the same time advertises one address
+   per interface, and Bonjour resolution returns all of them. Connecting to the
+   address of an interface that is not on our own subnet is routinely refused
+   (or blocked between VLANs), so prefer an address that shares a subnet with
+   one of our own interfaces. */
+static BOOL TPAddressIsOnLocalSubnet(NSString * address)
+{
+	struct in_addr target;
+	if([address length] == 0 || inet_pton(AF_INET, [address UTF8String], &target) != 1)
+		return NO;
+	
+	struct ifaddrs * ifaddr = NULL;
+	if(getifaddrs(&ifaddr) == -1 || ifaddr == NULL)
+		return NO;
+	
+	BOOL matches = NO;
+	struct ifaddrs * ifa;
+	for(ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+		if(ifa->ifa_addr == NULL || ifa->ifa_netmask == NULL)
+			continue;
+		if(ifa->ifa_addr->sa_family != AF_INET || ifa->ifa_netmask->sa_family != AF_INET)
+			continue;
+		if((ifa->ifa_flags & IFF_LOOPBACK) || !(ifa->ifa_flags & IFF_UP))
+			continue;
+		
+		struct in_addr localAddress = ((struct sockaddr_in *)ifa->ifa_addr)->sin_addr;
+		struct in_addr mask = ((struct sockaddr_in *)ifa->ifa_netmask)->sin_addr;
+		
+		if((target.s_addr & mask.s_addr) == (localAddress.s_addr & mask.s_addr)) {
+			matches = YES;
+			break;
+		}
+	}
+	
+	freeifaddrs(ifaddr);
+	
+	return matches;
+}
+
+static BOOL TPAddressIsLinkLocal(NSString * address)
+{
+	return [address hasPrefix:@"169.254."];
+}
+
+/* Same-subnet first, then any routable address, then whatever is left. */
+static NSString * TPPreferredAddress(NSArray * candidates)
+{
+	NSString * address;
+	
+	for(address in candidates) {
+		if(TPAddressIsOnLocalSubnet(address))
+			return address;
+	}
+	
+	for(address in candidates) {
+		if(!TPAddressIsLinkLocal(address))
+			return address;
+	}
+	
+	return [candidates firstObject];
 }
 
 @implementation TPBonjourController
@@ -366,41 +431,38 @@ static void pingRemoteAsync(NSString *host) {
 		if([addresses count] == 0)
 			return;
 		
-		//NSArray * localAddresses = [[NSHost currentHost] addresses];
-		NSString * ipAddressString = nil;
+		/* Keep every IPv4 candidate: one of the other interfaces of this host
+		   may be the only one that is reachable from here. */
+		NSMutableArray * candidates = [NSMutableArray array];
 		int port = 0;
 		
-		// Iterate through addresses until we find an IPv4 address
-		int index;
-		for(index = 0; index < [addresses count]; index++) {
-			NSData * address = addresses[index];
-			struct sockaddr * socketAddress = (struct sockaddr *)[address bytes];
+		for(NSData * addressData in addresses) {
+			struct sockaddr * socketAddress = (struct sockaddr *)[addressData bytes];
+			if(socketAddress == NULL || socketAddress->sa_family != AF_INET)
+				continue;
 			
-			if(socketAddress->sa_family == AF_INET) {
-				if(socketAddress != nil) {
-					char buffer[256];
-					if(inet_ntop(AF_INET, &((struct sockaddr_in *)socketAddress)->sin_addr, buffer, sizeof(buffer))) {
-#if LEGACY_BUILD
-						ipAddressString = [NSString stringWithCString:buffer];
-#else
-						ipAddressString = @(buffer);
-#endif
-						
-						//NSLog(@"ip: %@, local: %@", ipAddressString, localAddresses);
-						port = ntohs(((struct sockaddr_in *)socketAddress)->sin_port);
-					}
-				}				
-			}
+			char buffer[256];
+			if(inet_ntop(AF_INET, &((struct sockaddr_in *)socketAddress)->sin_addr, buffer, sizeof(buffer)) == NULL)
+				continue;
 			
-			if(ipAddressString != nil) {
-				break;
-			}
+			NSString * candidate = @(buffer);
+			if([candidates containsObject:candidate])
+				continue;
+			
+			[candidates addObject:candidate];
+			
+			if(port == 0)
+				port = ntohs(((struct sockaddr_in *)socketAddress)->sin_port);
 		}
 		
+		NSString * ipAddressString = TPPreferredAddress(candidates);
 		if(ipAddressString == nil)
 			return;
 		
+		NSLog(@"teleport: %@ resolved to %@, using %@", [service name], candidates, ipAddressString);
+		
 		TPRemoteHost * remoteHost = [[TPRemoteHost alloc] initWithIdentifier:[recordDict[TPRecordIDKey] stringValue] address:ipAddressString port:port];
+		[remoteHost setAlternateAddresses:candidates];
 		DebugLog(@"remoteHost: %@", remoteHost);
 
 		if([self _updateHost:remoteHost withRecordDict:recordDict]) {

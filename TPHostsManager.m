@@ -195,8 +195,17 @@ static TPHostsManager * _defaultHostsManager = nil;
 	if(knownHost != nil) {
 		if([bonjourHost address] != nil) {
 			TPHostState state = [knownHost hostState];
+			NSArray * candidates = [bonjourHost alternateAddresses];
 			
-			[knownHost setAddress:[bonjourHost address]];
+			/* Keep the address that actually worked last time as long as it is
+			   still advertised: re-resolution can list an unreachable interface
+			   first, and switching back would cost a failed connect. */
+			NSString * address = [bonjourHost address];
+			if([[knownHost address] length] > 0 && [candidates containsObject:[knownHost address]])
+				address = [knownHost address];
+			
+			[knownHost setAddress:address];
+			[knownHost setAlternateAddresses:candidates];
 			[knownHost setPort:[bonjourHost port]];
 			[knownHost setScreens:[bonjourHost screens]];
 			

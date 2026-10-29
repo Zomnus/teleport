@@ -31,6 +31,7 @@ typedef NS_OPTIONS(NSUInteger, TPHostState) {
 	SInt32 _osVersion;
 	SecCertificateRef _certRef;
 	NSString * _address;
+	NSArray * _alternateAddresses;
 	int _port;
 	NSImage * _backgroundImage;
 	NSArray * _screens;
@@ -54,6 +55,11 @@ typedef NS_OPTIONS(NSUInteger, TPHostState) {
 /* Address */
 - (void)setAddress:(NSString*)address;
 @property (nonatomic) int port;
+
+/* Every IPv4 address Bonjour advertised for this host, most reachable first.
+   A Bonjour name can resolve to addresses on several interfaces (Ethernet and
+   Wi-Fi); the connection tries these in turn when the main address fails. */
+@property (nonatomic, copy) NSArray *alternateAddresses;
 
 /* Certificate */
 @property (nonatomic) SecCertificateRef certificate;

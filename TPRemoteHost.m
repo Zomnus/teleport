@@ -262,6 +262,18 @@ NSString * TPRemoteHostCustomOptionsKey = @"customOptions";
 	}
 }
 
+- (NSArray*)alternateAddresses
+{
+	return _alternateAddresses;
+}
+
+- (void)setAlternateAddresses:(NSArray*)alternateAddresses
+{
+	if(alternateAddresses != _alternateAddresses) {
+		_alternateAddresses = [alternateAddresses copy];
+	}
+}
+
 - (void)setPort:(int)port
 {
 	_port = port;

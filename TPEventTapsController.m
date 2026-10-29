@@ -372,6 +372,39 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 	CGEventTapEnable(_eventPort, true);
 }
 
+- (void)rebuildTapAfterWake
+{
+	if(_eventPort == NULL)
+		return;
+	
+	NSLog(@"teleport: rebuilding the event tap after wake");
+	
+	CFRunLoopRef runLoop = _eventRunLoop;
+	if(!_tapOnMainRunLoop && runLoop != NULL && _eventThread != nil) {
+		/* Stop the tap thread and wait for it: it disposes of the invalidated
+		   port on its way out, and the next capture session installs a fresh
+		   one. Waiting avoids a window where a capture session would grab the
+		   port that is about to be thrown away. */
+		[_threadCondition lock];
+		CFRunLoopStop(runLoop);
+		/* Stop the timer from the thread that created it; the tap thread calls
+		   this again while tearing down, which is then a no-op. */
+		[self _stopTapHealthTimer];
+		NSDate * deadline = [NSDate dateWithTimeIntervalSinceNow:0.5];
+		while(_eventThread != nil && [deadline timeIntervalSinceNow] > 0)
+			[_threadCondition waitUntilDate:deadline];
+		BOOL threadStillRunning = (_eventThread != nil);
+		[_threadCondition unlock];
+		
+		if(threadStillRunning)
+			NSLog(@"teleport: event tap thread did not stop, leaving it alone");
+		return;
+	}
+	
+	_tapOnMainRunLoop = NO;
+	[self _teardownEventTap];
+}
+
 - (void)_stopGettingEvents
 {
 	[self _stopTapHealthTimer];

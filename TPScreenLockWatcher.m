@@ -64,10 +64,23 @@ static BOOL isScreenLocked(void) {
 	[[NSDistributedNotificationCenter defaultCenter] removeObserver:self.unlockObserver];
 }
 
+- (BOOL)refreshLockedState
+{
+	/* The distributed notifications can be missed around sleep/wake, and a stale
+	   "locked" flag keeps the event tap from being re-enabled for the rest of
+	   the process' life. Always trust the session dictionary over the cache. */
+	BOOL locked = isScreenLocked();
+	if(locked != _isLocked) {
+		DebugLog(@"Screen lock state corrected to %@", @(locked));
+		_isLocked = locked;
+	}
+	return _isLocked;
+}
+
 +(BOOL) isLocked {
 	if (defaultWatcher == nil) {
 		defaultWatcher = [[TPScreenLockWatcher alloc] init];
 	}
-	return defaultWatcher.isLocked;
+	return [defaultWatcher refreshLockedState];
 }
 @end

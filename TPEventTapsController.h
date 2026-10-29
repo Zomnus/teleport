@@ -32,4 +32,10 @@
 	NSInteger _cursorHidesIssued;
 }
 
+/* Rebuilds the capture tap after the system wakes. The system can invalidate a
+   session tap while the screen is locked, and CGEventTapEnable cannot revive an
+   invalidated port, so the tap thread is disposed of and a fresh tap is
+   installed on the next capture session. */
+- (void)rebuildTapAfterWake;
+
 @end

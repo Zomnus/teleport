@@ -64,6 +64,7 @@ static TPClientController * _defaultClientController = nil;
 - (void)_scheduleControlRequestTimer;
 - (void)_cancelControlRequestTimer;
 - (void)_controlRequestDidTimeout:(NSTimer*)timer;
+- (void)_abortControlRequestForHost:(TPRemoteHost*)host;
 - (void)_beginBufferingForPendingSwitchToHost:(TPRemoteHost*)remoteHost;
 - (void)_cancelBufferingForPendingSwitch;
 
@@ -219,6 +220,41 @@ static TPClientController * _defaultClientController = nil;
 	}
 }
 
+- (void)recoverAfterWake
+{
+	DebugLog(@"client: recovering after wake");
+	
+	/* The Mac may have gone to sleep in the middle of a switch. Anything that
+	   was negotiated, cached or buffered across the sleep is unusable now. */
+	if(_state == TPClientControllingState) {
+		[self stopControl];
+	}
+	
+	[self _cancelControlRequestTimer];
+	[self _cancelBufferingForPendingSwitch];
+	_controlRequestRetries = 0;
+	_pendingControlHost = nil;
+	[self _stopPointerChannel];
+	
+	/* Closes a socket that was kept open across the sleep. */
+	[self setCurrentConnection:nil];
+	_state = TPClientIdleState;
+	
+	/* Rebuild the hot borders from scratch: their windows and tracking areas do
+	   not always survive a lock plus display sleep, and a border that stopped
+	   reporting mouseEntered is indistinguishable from "the edge stopped
+	   working". */
+	NSArray * hotBorders = [_hotBorders allValues];
+	for(TPHotBorder * hotBorder in hotBorders) {
+		[hotBorder deactivate];
+		[self takeDownHotBorder:hotBorder];
+		[hotBorder close];
+	}
+	[_hotBorders removeAllObjects];
+	
+	[self updateTriggersAndShowVisualHint:NO];
+}
+
 - (float)hotBorderSwitchDelay:(TPHotBorder*)hotBorder
 {
 	TPRemoteHost * remoteHost = [[TPHostsManager defaultManager] hostWithIdentifier:[hotBorder identifier]];
@@ -283,6 +319,12 @@ static TPClientController * _defaultClientController = nil;
 		else
 			[hotBorder activate];
 	}
+	else {
+		/* Never swallow an edge hit without a trace: this is exactly the state
+		   the user sees as "the edge stopped working". */
+		NSLog(@"teleport: edge hit ignored, host %@ is not available (state=%lu)",
+			  [remoteHost computerName] ?: [hotBorder identifier], (unsigned long)[remoteHost hostState]);
+	}
 	
 	return NO;
 }
@@ -331,8 +373,19 @@ static TPClientController * _defaultClientController = nil;
 {
 	DebugLog(@"request start control on %@, _state=%ld", remoteHost, (long)_state);
 	
-	if(remoteHost == nil || [remoteHost hostState] != TPHostPeeredOnlineState || _state != TPClientIdleState)
+	if(remoteHost == nil) {
+		NSLog(@"teleport: switch ignored, no host to control");
 		return NO;
+	}
+	if([remoteHost hostState] != TPHostPeeredOnlineState) {
+		NSLog(@"teleport: switch ignored, %@ is not online (state=%lu)",
+			  [remoteHost computerName] ?: [remoteHost identifier], (unsigned long)[remoteHost hostState]);
+		return NO;
+	}
+	if(_state != TPClientIdleState) {
+		NSLog(@"teleport: switch ignored, client is busy (state=%ld)", (long)_state);
+		return NO;
+	}
 	
 	if(!isRetry)
 		_controlRequestRetries = 0;
@@ -374,8 +427,14 @@ static TPClientController * _defaultClientController = nil;
 	if(!started && [[TPConnectionsManager manager] connectToHost:remoteHost withDelegate:self infoDict:infoDict])
 		started = YES;
 	
-	if(!started)
+	if(!started) {
+		/* Could not even create a socket (unresolvable address, no route).
+		   Report it instead of silently re-arming the border. */
+		NSLog(@"teleport: could not start a connection to %@ (%@)",
+			  [remoteHost computerName] ?: [remoteHost identifier], [remoteHost address]);
+		[self _abortControlRequestForHost:remoteHost];
 		return NO;
+	}
 	
 	/* Stay in the connecting state until the server answers. Otherwise every
 	   extra edge hit while the network is slow sends another control request,
@@ -1024,32 +1083,41 @@ void TPSleepCallback(void * refCon, io_service_t service, natural_t messageType,
 	if(![self sendStartControlRequestForConnection:connection withInfoDict:infoDict]) {
 		/* The connection cannot carry the request: fail the attempt instead of
 		   leaving the client stuck in the connecting state. */
+		TPRemoteHost * host = _pendingControlHost;
+		if(host == nil && [[connection connectedHost] identifier] != nil)
+			host = [[TPHostsManager defaultManager] hostWithIdentifier:[[connection connectedHost] identifier]];
 		[self setCurrentConnection:nil];
-		[self _cancelControlRequestTimer];
-		[self _cancelBufferingForPendingSwitch];
-		_controlRequestRetries = 0;
-		_pendingControlHost = nil;
-		_state = TPClientIdleState;
-		[self updateTriggersAndShowVisualHint:NO];
+		[self _abortControlRequestForHost:host];
 	}
 }
 
 - (void)connectionToServerFailed:(TPRemoteHost*)host infoDict:(NSDictionary*)infoDict
 {
-	if (_state == TPClientConnectingState) {
-		/* Reset before showing the modal alert so the request watchdog cannot
-		   fire while the sheet is up. */
-		[self _cancelControlRequestTimer];
-		[self _cancelBufferingForPendingSwitch];
-		_controlRequestRetries = 0;
-		_pendingControlHost = nil;
-		_state = TPClientIdleState;
-		[self updateTriggersAndShowVisualHint:NO];
-		
-		NSString * msgTitle = [NSString stringWithFormat:NSLocalizedString(@"Connection to \\U201C%@\\U201D failed.", @"Title for connection failure"), [host computerName]];
-		NSAlert * alert = [NSAlert alertWithMessageText:msgTitle defaultButton:NSLocalizedString(@"OK", nil) alternateButton:nil otherButton:nil informativeTextWithFormat:NSLocalizedString(@"The server may be down, or an encryption problem may have occured. If encryption is enabled, please check that the certificate algorithms match.", nil)];
-		[(TPMainController*)[NSApp delegate] presentAlert:alert];
+	if(_state == TPClientConnectingState) {
+		[self _abortControlRequestForHost:host];
 	}
+}
+
+/* Single exit point for a switch that could not be negotiated: resets the state
+   machine before showing a modal alert, and makes the failure visible instead
+   of leaving the border silently re-armed. */
+- (void)_abortControlRequestForHost:(TPRemoteHost*)host
+{
+	[self _cancelControlRequestTimer];
+	[self _cancelBufferingForPendingSwitch];
+	_controlRequestRetries = 0;
+	_pendingControlHost = nil;
+	_state = TPClientIdleState;
+	[self updateTriggersAndShowVisualHint:NO];
+	
+	if(host == nil)
+		return;
+	
+	NSLog(@"teleport: connection to %@ failed", [host computerName] ?: [host identifier]);
+	
+	NSString * msgTitle = [NSString stringWithFormat:NSLocalizedString(@"Connection to \"%@\" failed.", @"Title for connection failure"), [host computerName]];
+	NSAlert * alert = [NSAlert alertWithMessageText:msgTitle defaultButton:NSLocalizedString(@"OK", nil) alternateButton:nil otherButton:nil informativeTextWithFormat:NSLocalizedString(@"The server may be down, or an encryption problem may have occured. If encryption is enabled, please check that the certificate algorithms match.", nil)];
+	[(TPMainController*)[NSApp delegate] presentAlert:alert];
 }
 
 - (void)connection:(TPNetworkConnection*)connection receivedMessage:(TPMessage*)message

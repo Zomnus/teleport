@@ -24,6 +24,10 @@ static NSString * TPMsgHostDataKey = @"host-data";
    would leave the client waiting indefinitely. */
 #define CONNECT_WATCHDOG_TIMEOUT 5.0
 
+/* Budget shared by every candidate address of one attempt: trying three
+   unreachable addresses must not keep the user waiting for 15 seconds. */
+#define CONNECT_TOTAL_TIMEOUT 8.0
+
 static TPConnectionsManager * _connectionsManager = nil;
 
 @class _TPSocketConnection;
@@ -46,6 +50,9 @@ static TPConnectionsManager * _connectionsManager = nil;
 	TPNetworkConnection * _connection;
 	id _delegate;
 	NSTimer * _connectTimer;
+	NSArray * _candidateAddresses;
+	NSUInteger _candidateIndex;
+	NSTimeInterval _connectStartDate;
 }
 
 - (instancetype) initWithConnectionToHost:(TPRemoteHost*)remoteHost delegate:(id)delegate infoDict:(NSDictionary*)infoDict NS_DESIGNATED_INITIALIZER;
@@ -70,26 +77,106 @@ static TPConnectionsManager * _connectionsManager = nil;
 	_host = remoteHost;
 	_infoDict = infoDict;
 	_delegate = delegate;
+	
+	/* A name can resolve to several addresses (one per interface of the peer).
+	   Try the preferred one first and fall back to the others instead of
+	   reporting a failure the user cannot act on. */
+	_candidateAddresses = [self _candidateAddressesForHost:remoteHost];
+	_candidateIndex = 0;
+	_connectStartDate = [NSDate timeIntervalSinceReferenceDate];
+	
+	while(_candidateIndex < [_candidateAddresses count] && ![self _connectToCurrentCandidate]) {
+		_candidateIndex++;
+	}
+	
+	if(_candidateIndex >= [_candidateAddresses count]) {
+		[_socket close];
+		_socket = nil;
+		return nil;
+	}
+	
+	return self;
+}
+
+- (NSArray*)_candidateAddressesForHost:(TPRemoteHost*)remoteHost
+{
+	NSMutableArray * addresses = [NSMutableArray array];
+	NSString * address = [remoteHost address];
+	
+	if([address length] > 0)
+		[addresses addObject:address];
+	
+	for(NSString * candidate in [remoteHost alternateAddresses]) {
+		if([candidate length] > 0 && ![addresses containsObject:candidate])
+			[addresses addObject:candidate];
+	}
+	
+	return addresses;
+}
+
+- (BOOL)_connectToCurrentCandidate
+{
+	if(_candidateIndex >= [_candidateAddresses count])
+		return NO;
+	
+	/* One budget for every candidate: three unreachable addresses must not keep
+	   the user waiting for the sum of their timeouts. */
+	NSTimeInterval remaining = CONNECT_TOTAL_TIMEOUT - ([NSDate timeIntervalSinceReferenceDate] - _connectStartDate);
+	if(remaining < 0.5) {
+		DebugLog(@"connection budget exhausted before %@", _candidateAddresses[_candidateIndex]);
+		return NO;
+	}
+	
+	NSString * address = _candidateAddresses[_candidateIndex];
+	
+	[_socket close];
 	_socket = [[TPTCPSecureSocket alloc] initWithDelegate:self];
 	
-	BOOL enableEncryption = [[TPLocalHost localHost] pairWithHost:remoteHost hasCapability:TPHostEncryptionCapability];
+	BOOL enableEncryption = [[TPLocalHost localHost] pairWithHost:_host hasCapability:TPHostEncryptionCapability];
 	[_socket setEnableEncryption:enableEncryption];
-	if([_socket connectToHost:[remoteHost address] onPort:[remoteHost port]]) {
-		[_socket setNoDelay:YES];
-		
-		/* The socket connects in the background; bound the whole attempt so a
-		   sleeping or unreachable peer cannot keep us in "connecting". */
-		_connectTimer = [NSTimer timerWithTimeInterval:CONNECT_WATCHDOG_TIMEOUT
-												target:self
-											  selector:@selector(_connectTimedOut:)
-											  userInfo:nil
-											   repeats:NO];
-		[[NSRunLoop mainRunLoop] addTimer:_connectTimer forMode:NSRunLoopCommonModes];
-		
-		return self;
+	if(![_socket connectToHost:address onPort:[_host port]]) {
+		DebugLog(@"could not start a connection to %@ (%@)", _host, address);
+		[_socket close];
+		_socket = nil;
+		return NO;
 	}
+	
+	[_socket setNoDelay:YES];
+	
+	/* The socket connects in the background; bound the whole attempt so a
+	   sleeping or unreachable peer cannot keep us in "connecting". */
+	[self _cancelConnectTimer];
+	_connectTimer = [NSTimer timerWithTimeInterval:MIN(CONNECT_WATCHDOG_TIMEOUT, remaining)
+											target:self
+										  selector:@selector(_connectTimedOut:)
+										  userInfo:nil
+										   repeats:NO];
+	[[NSRunLoop mainRunLoop] addTimer:_connectTimer forMode:NSRunLoopCommonModes];
+	
+	return YES;
+}
+
+/* Drops the failed socket and moves on to the next advertised address. Reports
+   the failure to the manager only once every candidate was tried. */
+- (void)_tryNextCandidateAfterSocket:(TPTCPSocket*)socket
+{
+	/* Ignore callbacks from a socket that was already abandoned. */
+	if(socket != nil && socket != (TPTCPSocket*)_socket)
+		return;
+	
+	[self _cancelConnectTimer];
+	
 	[_socket close];
-	return nil;
+	_socket = nil;
+	
+	_candidateIndex++;
+	while(_candidateIndex < [_candidateAddresses count] && ![self _connectToCurrentCandidate])
+		_candidateIndex++;
+	
+	if(_candidateIndex < [_candidateAddresses count])
+		return;
+	
+	[[TPConnectionsManager manager] _socketConnectionFailed:self];
 }
 
 - (void)dealloc
@@ -108,8 +195,7 @@ static TPConnectionsManager * _connectionsManager = nil;
 	_connectTimer = nil;
 	
 	DebugLog(@"connection attempt timed out");
-	[_socket close];
-	[[TPConnectionsManager manager] _socketConnectionFailed:self];
+	[self _tryNextCandidateAfterSocket:nil];
 }
 
 
@@ -136,6 +222,12 @@ static TPConnectionsManager * _connectionsManager = nil;
 - (void)tcpSocketConnectionSucceeded:(TPTCPSocket*)tcpSocket
 {
 	PRINT_ME;
+	
+	/* A late callback from an abandoned candidate must not hijack the socket
+	   that is currently being tried. */
+	if(tcpSocket != (TPTCPSocket*)_socket)
+		return;
+	
 	[self _cancelConnectTimer];
 	_connection = [[TPNetworkConnection alloc] initWithSocket:tcpSocket];
 	
@@ -145,6 +237,9 @@ static TPConnectionsManager * _connectionsManager = nil;
 
 - (void)tcpSocketSecureConnectionSucceeded:(TPTCPSecureSocket*)tcpSocket
 {
+	if(tcpSocket != _socket)
+		return;
+	
 	SecCertificateRef certRef = [tcpSocket copyPeerCertificate];
 	[_host setCertificate:certRef];
 	CFRelease(certRef);
@@ -155,15 +250,13 @@ static TPConnectionsManager * _connectionsManager = nil;
 - (void)tcpSocketConnectionFailed:(TPTCPSocket*)tcpSocket
 {
 	PRINT_ME;
-	[self _cancelConnectTimer];
-	[[TPConnectionsManager manager] _socketConnectionFailed:self];
+	[self _tryNextCandidateAfterSocket:tcpSocket];
 }
 
 - (void)tcpSocketSecureConnectionFailed:(TPTCPSecureSocket*)tcpSocket
 {
 	PRINT_ME;
-	[self _cancelConnectTimer];
-	[[TPConnectionsManager manager] _socketConnectionFailed:self];
+	[self _tryNextCandidateAfterSocket:tcpSocket];
 }
 
 - (void)connection:(TPNetworkConnection*)connection receivedMessage:(TPMessage*)message

@@ -35,6 +35,14 @@
 #import "TPNetworkConnection.h"
 #import "TPTestsController.h"
 #import "TPEventsController.h"
+#import "TPEventTapsController.h"
+#import "TPDirectEventTapsController.h"
+#import "TPScreenLockWatcher.h"
+
+/* Both sleep and display wake can leave the connection, the hot borders and the
+   event tap in a state the system will not recover. Give the notifications of a
+   full wake a moment to arrive, then rebuild everything once. */
+#define WAKE_RECOVERY_DELAY 2.0
 
 typedef CGError CGSError;
 
@@ -49,6 +57,8 @@ static TPMainController * _mainController = nil;
 
 - (void)_checkAccessibility;
 - (void)_checkEncryption;
+- (void)_scheduleWakeRecovery:(BOOL)full;
+- (void)_recoverAfterWake;
 
 @end
 
@@ -240,6 +250,7 @@ static TPMainController * _mainController = nil;
 	DebugLog(@"waking screens");
 	[self _setupTimer];
 	[self _sendWakeEvent];
+	[self _scheduleWakeRecovery:NO];
 }
 - (void)sessionDidResignActive:(NSNotification*)notification
 {
@@ -280,14 +291,59 @@ static TPMainController * _mainController = nil;
 - (void)computerDidWake:(NSNotification*)notification
 {
 	[[TPHostsManager defaultManager] notifyChanges];
-	[[TPClientController defaultController] updateTriggersAndShowVisualHint:YES];
+	[self _scheduleWakeRecovery:YES];
+}
+
+- (void)_scheduleWakeRecovery:(BOOL)full
+{
+	if(full)
+		_fullWakeRecovery = YES;
+	
+	[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(_recoverAfterWake) object:nil];
+	[self performSelector:@selector(_recoverAfterWake) withObject:nil afterDelay:WAKE_RECOVERY_DELAY];
+}
+
+- (void)_recoverAfterWake
+{
+	BOOL full = _fullWakeRecovery;
+	_fullWakeRecovery = NO;
+	
+	NSLog(@"teleport: recovering after wake (%@)", full ? @"full" : @"local");
+	
+	[TPEventsController invalidateScreenCaches];
+	
+	/* Authoritative re-read: a lock notification missed around the sleep would
+	   otherwise keep the event tap disabled for the rest of the process' life. */
+	(void)[TPScreenLockWatcher isLocked];
+	
+	/* Never tear down a live session: only rebuild the local state when the Mac
+	   is not in the middle of controlling another one. */
+	if(![[TPClientController defaultController] isControlling]) {
+		[[TPClientController defaultController] recoverAfterWake];
+		[(TPEventTapsController*)[TPEventTapsController defaultController] rebuildTapAfterWake];
+		[(TPEventTapsController*)[TPDirectEventTapsController defaultController] rebuildTapAfterWake];
+	}
+	
+	if(!full)
+		return;
+	
+	/* Re-resolve the peers: the address advertised before the sleep may be gone
+	   (DHCP renewal, interface order change). */
+	[[TPBonjourController defaultController] stopBrowsing];
+	[[TPBonjourController defaultController] browse];
 	
 	CFDictionaryRef sessionInfoDict = CGSessionCopyCurrentDictionary();
-
-	if(CFDictionaryGetValue(sessionInfoDict, kCGSessionOnConsoleKey) == kCFBooleanTrue && [[TPServerController defaultController] allowControl])
-		[[TPServerController defaultController] startSharing];
+	BOOL onConsole = (sessionInfoDict != NULL) && (CFDictionaryGetValue(sessionInfoDict, kCGSessionOnConsoleKey) == kCFBooleanTrue);
+	if(sessionInfoDict != NULL)
+		CFRelease(sessionInfoDict);
 	
-	CFRelease(sessionInfoDict);
+	TPServerController * serverController = [TPServerController defaultController];
+	if(onConsole && [serverController allowControl] && ![serverController isControlled]) {
+		/* Rebuild the listening socket and the advertisement as well: they were
+		   closed before the sleep. */
+		[serverController stopSharing];
+		[serverController startSharing];
+	}
 }
 
 - (void)networkConfigurationDidChange:(TPNetworkConfigurationWatcher*)watcher

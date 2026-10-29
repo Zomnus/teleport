@@ -55,6 +55,10 @@ typedef NS_ENUM(NSInteger, TPClientState) {
 
 - (void)updateTriggersAndShowVisualHint:(BOOL)showVisualHint;
 
+/* Called after the Mac wakes: drops the connection and UI state that was
+   cached across the sleep so the next switch starts from a clean slate. */
+- (void)recoverAfterWake;
+
 - (BOOL)requestStartControlOnHost:(TPRemoteHost*)remoteHost atLocation:(NSPoint)location withDraggingInfo:(id <NSDraggingInfo>)draggingInfo;
 - (BOOL)sendStartControlRequestForConnection:(TPNetworkConnection*)connection withInfoDict:(NSDictionary*)infoDict;
 - (void)startControl;
