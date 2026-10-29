@@ -1,7 +1,7 @@
 # teleport-pro
 ## A Virtual KVM for macOS
 
-[![Release](https://img.shields.io/badge/release-v1.4.8-blue)](https://github.com/Zomnus/teleport-pro/releases/latest)
+[![Release](https://img.shields.io/badge/release-v1.4.10-blue)](https://github.com/Zomnus/teleport-pro/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-macOS%2012%2B-lightgrey)](#installation)
 
 Use one keyboard and pointing device to control multiple Macs.
@@ -11,9 +11,9 @@ Use one keyboard and pointing device to control multiple Macs.
 
 ---
 
-## 本次优化说明（v1.4 → v1.4.8）
+## 本次优化说明（v1.4 → v1.4.10）
 
-本仓库 fork 自 [johndbritton/teleport](https://github.com/johndbritton/teleport)（原始作者 [abyssoft](https://github.com/abyssoft)）。上游已停止维护，本项目独立维护、不再与上游同步，仅保留来源记录。针对两台 Mac 之间切换键鼠时的「顺滑度」完成了一轮性能优化与稳定性修复，当前版本为 **v1.4.8**。
+本仓库 fork 自 [johndbritton/teleport](https://github.com/johndbritton/teleport)（原始作者 [abyssoft](https://github.com/abyssoft)）。上游已停止维护，本项目独立维护、不再与上游同步，仅保留来源记录。针对两台 Mac 之间切换键鼠时的「顺滑度」完成了一轮性能优化与稳定性修复，当前版本为 **v1.4.10**。
 
 完整的技术分析、延迟拆解、风险与实施记录见：
 
@@ -101,10 +101,22 @@ Use one keyboard and pointing device to control multiple Macs.
 - 修复：接收端在 `CGEventCreateFromData` 之后、注入之前将该字段清零，由本机 WindowServer 重新盖章，行为与旧的手写序列化路径一致；普通窗口、拖拽、键盘与滚动不受影响。
 - 协议未变，`PROTOCOL_VERSION` 仍为 21，可与 v1.4.2 ~ v1.4.7 互通。
 
+#### v1.4.9 修复：Shift + 受控 Mac 本机触摸板无法连选
+
+- 现象：用 MacBook Air 的键盘按住 Shift、同时用 Mac mini 的触摸板点击时，访达无法 Shift 连选，文档内无法 Shift 选字；键盘与触摸板都使用 Air 时正常。
+- 根因：修饰键状态分 HID 与 session 两层。注入的 `flagsChanged` 只投到 session tap，只更新 session 状态；受控 Mac 的**本机硬件点击**的修饰标志由 HID 状态生成，因此看不到远程按下的 Shift。
+- 修复：接收端把 `flagsChanged` 改投到 HID event tap（其他事件仍走 session tap），直通与手写序列化两条路径同时生效；协议未变，`PROTOCOL_VERSION` 仍为 21。
+
+#### v1.4.10 修复：远程修饰键未作用于受控 Mac 的本机硬件点击
+
+- v1.4.9 把 `flagsChanged` 改投 HID tap 只能短时间改变 HID 状态，受控 Mac 的触摸板/键盘一旦产生真实 HID 事件，系统会用本机硬件键盘状态重新盖章，远程按下的 Shift 仍然丢失。
+- 修复：接收端在会话期间安装一个本地事件 tap，记录发送端当前按住的修饰键（Shift/Control/Option/Command），并仅对**本机真实硬件输入**的鼠标按下/抬起/拖拽事件补上这些标志；注入事件与普通输入不受影响。
+- 现在「Air 键盘 Shift + mini 触摸板」也能正常连选文件与选字；Air 触摸板 + Air 键盘的组合行为不变。协议未变，`PROTOCOL_VERSION` 仍为 21。
+
 ### 兼容性提示
 
 - `PROTOCOL_VERSION = 21`：两台 Mac 必须同时升级到 v1.4.x，否则会提示协议版本不匹配（预期行为，避免新旧混用导致事件格式错乱）。
-- v1.4.4 ~ v1.4.8 均未改动协议，与 v1.4.2 / v1.4.3 可互通。
+- v1.4.4 ~ v1.4.10 均未改动协议，与 v1.4.2 / v1.4.3 可互通。
 - UDP 指针通道是可选项：两端都升级时自动启用，任一条件不满足（旧版本、防火墙、端口占用）都会自动回落到纯 TCP，不需要手动配置。
 - 首次运行仍需在「系统设置 → 隐私与安全性 → 辅助功能」中授权。
 

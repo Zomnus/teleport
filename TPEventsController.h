@@ -83,6 +83,15 @@
 	/* Capture side: when set, mouse movement is sent through this block instead
 	   of the ordered TCP stream. Returning NO falls back for that event. */
 	BOOL (^_pointerDeltaSender)(TPMouseDelta delta, uint8_t buttons, uint32_t ageMs);
+	
+	/* Receiver side: modifiers currently held on the sending Mac. A click made
+	   with the receiving Mac's own trackpad is stamped from its local HID
+	   keyboard state, so the tap adds these flags to local mouse events while a
+	   session is active. */
+	CGEventFlags _remoteModifierFlags;
+	NSLock * _remoteModifierLock;
+	CFMachPortRef _modifierRewriteTap;
+	CFRunLoopSourceRef _modifierRewriteSource;
 }
 
 + (TPEventsController*)defaultController;
@@ -139,6 +148,11 @@
 - (NSData*)_eventDataFromEvent:(id)event;
 - (void)_postEventWithEventData:(NSData*)eventData;
 - (void)_postEvent:(CGEventRef)event withTimestamp:(CGEventTimestamp)timestamp;
+
+- (void)_updateRemoteModifierFlags:(CGEventFlags)flags;
+- (CGEventFlags)_remoteModifierFlagsSnapshot;
+- (void)_startModifierRewriteTap;
+- (void)_stopModifierRewriteTap;
 
 - (void)_updateMouseLocationWithMouseDelta:(TPMouseDelta)mouseDelta;
 - (void)_rebuildScreenCacheIfNeeded;

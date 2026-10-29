@@ -421,6 +421,8 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 		_pointerQueueCount = 0;
 		[_pointerQueueLock unlock];
 	});
+	
+	[self _startModifierRewriteTap];
 }
 
 - (void)stopPostingEvents
@@ -434,6 +436,9 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 		
 		_mouseLocationValid = NO;
 	});
+	
+	[self _stopModifierRewriteTap];
+	[self _updateRemoteModifierFlags:0];
 }
 
 - (void)_postEvent:(CGEventRef)event
@@ -447,6 +452,14 @@ static CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEvent
 	
 	if(_eventSource != NULL) {
 		CGEventSetSource(event, _eventSource);
+	}
+	
+	/* Remember which modifiers the remote keyboard is holding. Clicks made with
+	   the receiving Mac's own trackpad are stamped from its HID keyboard state,
+	   which never contains them; the rewrite tap adds them back for local
+	   hardware input so Shift-click extends a selection. */
+	if(CGEventGetType(event) == kCGEventFlagsChanged) {
+		[self _updateRemoteModifierFlags:CGEventGetFlags(event)];
 	}
 	
 	CGEventPost(kCGSessionEventTap, event);

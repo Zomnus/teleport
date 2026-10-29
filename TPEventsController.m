@@ -40,6 +40,7 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 		_postingQueue = dispatch_queue_create("teleport.eventpost", attributes);
 		_screenCacheLock = [[NSLock alloc] init];
 		_pointerQueueLock = [[NSLock alloc] init];
+		_remoteModifierLock = [[NSLock alloc] init];
 	}
 	
 	return self;
@@ -48,6 +49,115 @@ extern CGEventTimestamp CGSCurrentEventTimestamp(void);
 - (dispatch_queue_t)_postingQueue
 {
 	return _postingQueue;
+}
+
+#pragma mark -
+#pragma mark Remote modifiers for local hardware input
+
+/* Modifiers held on the sending Mac. A click made with the receiving Mac's own
+   trackpad is stamped from its local HID keyboard state, so these flags have to
+   be added to local hardware mouse events while a session is active (Shift-click
+   in Finder or in a text view would otherwise behave like a plain click). */
+static const CGEventFlags TPModifierRewriteMask = (kCGEventFlagMaskShift | kCGEventFlagMaskControl | kCGEventFlagMaskAlternate | kCGEventFlagMaskCommand);
+
+- (void)_updateRemoteModifierFlags:(CGEventFlags)flags
+{
+	[_remoteModifierLock lock];
+	_remoteModifierFlags = (flags & TPModifierRewriteMask);
+	[_remoteModifierLock unlock];
+}
+
+- (CGEventFlags)_remoteModifierFlagsSnapshot
+{
+	[_remoteModifierLock lock];
+	CGEventFlags flags = _remoteModifierFlags;
+	[_remoteModifierLock unlock];
+	return flags;
+}
+
+- (void)_setModifierRewriteTapEnabled:(BOOL)enabled
+{
+	if(_modifierRewriteTap != NULL)
+		CGEventTapEnable(_modifierRewriteTap, enabled);
+}
+
+static CGEventRef TPModifierRewriteCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *refcon)
+{
+	TPEventsController * self = (__bridge TPEventsController*)refcon;
+	
+	if(type == kCGEventTapDisabledByTimeout) {
+		[self _setModifierRewriteTapEnabled:YES];
+		return event;
+	}
+	
+	if(type >= kCGEventTapDisabledByTimeout)
+		return event;
+	
+	switch(type) {
+		case kCGEventLeftMouseDown:
+		case kCGEventLeftMouseUp:
+		case kCGEventLeftMouseDragged:
+		case kCGEventRightMouseDown:
+		case kCGEventRightMouseUp:
+		case kCGEventRightMouseDragged:
+		case kCGEventOtherMouseDown:
+		case kCGEventOtherMouseUp:
+		case kCGEventOtherMouseDragged:
+			break;
+		default:
+			return event;
+	}
+	
+	/* Injected events carry the poster's pid and a non-HID source state: only
+	   real hardware input needs the remote modifiers added. */
+	if(CGEventGetIntegerValueField(event, kCGEventSourceUnixProcessID) != 0)
+		return event;
+	
+	if(CGEventGetIntegerValueField(event, kCGEventSourceStateID) != kCGEventSourceStateHIDSystemState)
+		return event;
+	
+	CGEventFlags remoteFlags = [self _remoteModifierFlagsSnapshot];
+	if(remoteFlags == 0)
+		return event;
+	
+	CGEventSetFlags(event, CGEventGetFlags(event) | remoteFlags);
+	return event;
+}
+
+- (void)_startModifierRewriteTap
+{
+	if(_modifierRewriteTap != NULL)
+		return;
+	
+	CGEventMask mask = CGEventMaskBit(kCGEventLeftMouseDown) | CGEventMaskBit(kCGEventLeftMouseUp) | CGEventMaskBit(kCGEventLeftMouseDragged) |
+		CGEventMaskBit(kCGEventRightMouseDown) | CGEventMaskBit(kCGEventRightMouseUp) | CGEventMaskBit(kCGEventRightMouseDragged) |
+		CGEventMaskBit(kCGEventOtherMouseDown) | CGEventMaskBit(kCGEventOtherMouseUp) | CGEventMaskBit(kCGEventOtherMouseDragged);
+	
+	_modifierRewriteTap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault, mask, TPModifierRewriteCallback, (__bridge void*)self);
+	if(_modifierRewriteTap == NULL) {
+		DebugLog(@"Local modifier rewrite tap unavailable");
+		return;
+	}
+	
+	_modifierRewriteSource = CFMachPortCreateRunLoopSource(NULL, _modifierRewriteTap, 0);
+	CFRunLoopAddSource(CFRunLoopGetMain(), _modifierRewriteSource, kCFRunLoopCommonModes);
+	CGEventTapEnable(_modifierRewriteTap, true);
+}
+
+- (void)_stopModifierRewriteTap
+{
+	if(_modifierRewriteSource != NULL) {
+		CFRunLoopRemoveSource(CFRunLoopGetMain(), _modifierRewriteSource, kCFRunLoopCommonModes);
+		CFRelease(_modifierRewriteSource);
+		_modifierRewriteSource = NULL;
+	}
+	
+	if(_modifierRewriteTap != NULL) {
+		CGEventTapEnable(_modifierRewriteTap, false);
+		CFMachPortInvalidate(_modifierRewriteTap);
+		CFRelease(_modifierRewriteTap);
+		_modifierRewriteTap = NULL;
+	}
 }
 
 + (TPEventsController*)defaultController
